@@ -1,17 +1,14 @@
 export default async function handler(req, res) {
-  // Activer CORS pour permettre ton app GoodBarber
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    res.status(200).end();
-    return;
+    return res.status(200).end();
   }
 
   const { date, dept = "", category = "", type = "" } = req.query;
 
   try {
-    // 1) Récupération de la page HTML Padel Magazine
     const upstream = await fetch("https://tournois.padelmagazine.fr/", {
       headers: {
         "User-Agent": "Mozilla/5.0 (PadelProxyApp/1.0)",
@@ -19,24 +16,21 @@ export default async function handler(req, res) {
       },
     });
 
-    if (!upstream.ok) {
-      throw new Error("Unable to reach Padel Magazine");
-    }
-
     const html = await upstream.text();
 
-    // 2) On parse tous les blocs <div class="tournoi-item">
+    // --------- REGEX CORRECTE POUR CAPTURER UN BLOC ENTIER ----------
+    const regex = /<div class="tournoi-item">([\s\S]*?)<\/div>\s*<\/div>/g;
+
     const tournaments = [];
-    const blocks = html.split('<div class="tournoi-item">').slice(1);
+    let match;
 
-    for (const block of blocks) {
-      const itemHtml = block.split("</div>")[0];
+    while ((match = regex.exec(html)) !== null) {
+      const block = match[0];
 
-      const t = extractTournament(itemHtml);
-
+      const t = extractTournament(block);
       if (!t) continue;
 
-      // 3) Filtres dynamiques (date / catégorie / type / département)
+      // Filtres
       if (date && t.startDate !== date) continue;
       if (dept && t.department !== dept) continue;
       if (category && t.category !== category) continue;
@@ -45,9 +39,7 @@ export default async function handler(req, res) {
       tournaments.push(t);
     }
 
-    // 4) Retour JSON
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Content-Type", "application/json");
     res.status(200).json(tournaments);
   } catch (err) {
     console.error(err);
@@ -57,103 +49,75 @@ export default async function handler(req, res) {
 }
 
 //
-// ------- Extraction d’un tournoi depuis un bloc HTML -------
+// -------------- PARSING TOURNAMENT --------------
 //
-function extractTournament(block) {
-  // Nom + catégorie + type
-  const nameMatch = block.match(/<h4 class="name">([^<]+)<\/h4>/);
+function extractTournament(html) {
+  const nameMatch = html.match(/<h4 class="name">([^<]+)<\/h4>/);
   if (!nameMatch) return null;
-  const fullName = clean(nameMatch[1]); // Exemple "P100 HOMMES"
 
-  const category = extractCategory(fullName);      // "P100"
-  const type = extractType(fullName);              // "H", "F", "M", "J"
-  const name = fullName;                           // on garde le titre entier
+  const fullName = clean(nameMatch[1]);
+  const category = extractCategory(fullName);
+  const type = extractType(fullName);
 
-  // Date (format humain → ISO)
-  const dateMatch = block.match(/<span class="month">([^<]+)<\/span>/);
+  // Date
+  const dateMatch = html.match(/<span class="month">([^<]+)<\/span>/);
   const dateText = dateMatch ? clean(dateMatch[1]) : "";
-  const isoDate = toISODate(dateText);             // "2025-11-17"
+  const isoDate = toISODate(dateText);
 
   // Club
-  const clubMatch = block.match(/<a href="[^"]+" class="text">([^<]+)<\/a>/);
-  const clubName = clubMatch ? clean(clubMatch[1]) : "";
+  const clubMatch = html.match(/<a href="[^"]+" class="text">([^<]+)<\/a>/);
+  const club = clubMatch ? clean(clubMatch[1]) : "";
 
-  // Ville (toujours la dernière <span class="text"> dans le bloc club)
-  const cityMatch = block.match(/<img src="\/images\/adresse.svg"[^>]*>\s*<span class="text">\s*([^<]+)/);
+  // Ville
+  const cityMatch = html.match(/<img src="\/images\/adresse.svg"[^>]*>\s*<span class="text">\s*([^<]+)/);
   const city = cityMatch ? clean(cityMatch[1]) : "";
 
-  // Département (on tente d’extraire un code postal)
-  const cpMatch = block.match(/\b(\d{5})\b/);
+  // Département (via code postal)
+  const cpMatch = html.match(/\b(\d{5})\b/);
   const department = cpMatch ? cpMatch[1].substring(0, 2) : "";
 
-  // Logo (Padel Magazine n’a pas l’air d’en fournir)
-  const logoUrl = null;
-
   return {
-    id: name + "_" + isoDate + "_" + clubName, // identifiant généré
-    name,
-    club: clubName,
+    id: `${fullName}_${isoDate}_${club}`,
+    name: fullName,
+    club,
     city,
     department,
     category,
     type,
     startDate: isoDate,
     endDate: isoDate,
-    logoUrl,
+    logoUrl: null,
   };
 }
 
 //
-// ------- Helpers -------
+// -------------- HELPERS --------------
 //
-
-// Nettoyage texte
 function clean(str) {
   return str.replace(/\s+/g, " ").trim();
 }
 
-// Détection catégorie (ex: P25 / P100 / P250 / P500…)
 function extractCategory(title) {
-  const match = title.match(/P\d+/i);
-  return match ? match[0].toUpperCase() : "LOISIR";
+  const m = title.match(/P\d+/i);
+  return m ? m[0].toUpperCase() : "LOISIR";
 }
 
-// Détection type : Hommes / Femmes / Mixte / Jeunes
 function extractType(title) {
   title = title.toLowerCase();
-  if (title.includes("homme") || title.includes("hommes")) return "H";
+  if (title.includes("homme")) return "H";
   if (title.includes("femme") || title.includes("dame")) return "F";
   if (title.includes("mixte")) return "M";
   if (title.includes("jeune")) return "J";
   return "";
 }
 
-// Convertir "17 nov. 2025" → "2025-11-17"
 function toISODate(text) {
   if (!text) return "";
 
-  const mois = {
+  const months = {
     janv: "01",
     févr: "02",
     mars: "03",
     avr: "04",
     mai: "05",
-    juin: "06",
-    juil: "07",
-    août: "08",
-    sept: "09",
-    oct: "10",
-    nov: "11",
-    déc: "12",
-  };
-
-  const m = text.match(/(\d{1,2})\s+([A-Za-zéû\.]+)\s+(\d{4})/);
-  if (!m) return "";
-
-  const jour = m[1].padStart(2, "0");
-  const moisTxt = m[2].replace(".", "");
-  const moisNum = mois[moisTxt] || "01";
-  const annee = m[3];
-
-  return `${annee}-${moisNum}-${jour}`;
-}
+    juin
