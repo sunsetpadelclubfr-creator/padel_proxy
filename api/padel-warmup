@@ -1,0 +1,21 @@
+// /pages/api/padel-warmup.js
+
+export default async function handler(req, res) {
+  // On appelle simplement ton proxy pour aujourd’hui + sans filtres
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  const url = `${process.env.NEXT_PUBLIC_BASE_URL || 'https://padel-proxy.vercel.app'}/api/padel-proxy?date=${today}`;
+
+  try {
+    const r = await fetch(url);
+    const json = await r.json();
+
+    return res.status(200).json({
+      ok: true,
+      count: json.length || 0,
+    });
+  } catch (e) {
+    console.error("Warmup error:", e);
+    return res.status(500).json({ ok: false, error: String(e) });
+  }
+}
