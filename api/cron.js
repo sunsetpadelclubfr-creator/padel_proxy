@@ -1,21 +1,34 @@
 // api/cron.js
 
 export default async function handler(req, res) {
+  // Sécurité simple : accepte seulement GET
+  if (req.method !== "GET") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
   try {
-    const targetUrl = `https://${req.headers.host}/api/padel-proxy?refresh=1`;
+    // On appelle simplement ton proxy pour remplir le cache
+    const baseUrl = process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : "https://padel-proxy.vercel.app"; // fallback
 
-    console.log("Refreshing cache via cron:", targetUrl);
+    // Ici tu choisis les paramètres "par défaut" que tu veux pré-charger
+    const url = `${baseUrl}/api/padel-proxy?date=&dept=&category=&type=`;
 
-    const upstream = await fetch(targetUrl);
+    const resp = await fetch(url);
+    const data = await resp.json();
 
-    const data = await upstream.json();
+    console.log("Cron cache refresh done, tournaments:", data.length || 0);
 
     return res.status(200).json({
       ok: true,
-      updated: new Date().toISOString(),
-      items: data.length || 0,
+      refreshed: true,
+      count: data.length || 0,
     });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    console.error("Cron error:", e);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Cron failed", details: e.message });
   }
 }
