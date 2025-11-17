@@ -18,7 +18,6 @@ export default async function handler(req, res) {
 
     const html = await upstream.text();
 
-    // --------- REGEX CORRECTE POUR CAPTURER UN BLOC ENTIER ----------
     const regex = /<div class="tournoi-item">([\s\S]*?)<\/div>\s*<\/div>/g;
 
     const tournaments = [];
@@ -30,7 +29,6 @@ export default async function handler(req, res) {
       const t = extractTournament(block);
       if (!t) continue;
 
-      // Filtres
       if (date && t.startDate !== date) continue;
       if (dept && t.department !== dept) continue;
       if (category && t.category !== category) continue;
@@ -48,9 +46,6 @@ export default async function handler(req, res) {
   }
 }
 
-//
-// -------------- PARSING TOURNAMENT --------------
-//
 function extractTournament(html) {
   const nameMatch = html.match(/<h4 class="name">([^<]+)<\/h4>/);
   if (!nameMatch) return null;
@@ -59,20 +54,16 @@ function extractTournament(html) {
   const category = extractCategory(fullName);
   const type = extractType(fullName);
 
-  // Date
   const dateMatch = html.match(/<span class="month">([^<]+)<\/span>/);
   const dateText = dateMatch ? clean(dateMatch[1]) : "";
   const isoDate = toISODate(dateText);
 
-  // Club
   const clubMatch = html.match(/<a href="[^"]+" class="text">([^<]+)<\/a>/);
   const club = clubMatch ? clean(clubMatch[1]) : "";
 
-  // Ville
   const cityMatch = html.match(/<img src="\/images\/adresse.svg"[^>]*>\s*<span class="text">\s*([^<]+)/);
   const city = cityMatch ? clean(cityMatch[1]) : "";
 
-  // Département (via code postal)
   const cpMatch = html.match(/\b(\d{5})\b/);
   const department = cpMatch ? cpMatch[1].substring(0, 2) : "";
 
@@ -90,9 +81,6 @@ function extractTournament(html) {
   };
 }
 
-//
-// -------------- HELPERS --------------
-//
 function clean(str) {
   return str.replace(/\s+/g, " ").trim();
 }
@@ -117,7 +105,26 @@ function toISODate(text) {
   const months = {
     janv: "01",
     févr: "02",
+    fév: "02",
     mars: "03",
     avr: "04",
     mai: "05",
-    juin
+    juin: "06",
+    juil: "07",
+    août: "08",
+    sept: "09",
+    oct: "10",
+    nov: "11",
+    déc: "12",
+  };
+
+  const m = text.match(/(\d{1,2})\s+([A-Za-zéû\.]+)\s+(\d{4})/);
+  if (!m) return "";
+
+  const d = m[1].padStart(2, "0");
+  const monthTxt = m[2].replace(".", "");
+  const month = months[monthTxt] || "01";
+  const year = m[3];
+
+  return `${year}-${month}-${d}`;
+}
