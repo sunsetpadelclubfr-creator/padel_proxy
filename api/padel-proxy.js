@@ -213,7 +213,7 @@ function extractTournament(html) {
 
   const { street, city, department } = parseAddress(rawAddress);
 
-  // Organisateur
+  // Organisateur test
   const organizerName = get(
     html,
     /<i class="fas fa-user"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
