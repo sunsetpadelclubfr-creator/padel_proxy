@@ -1,1 +1,9 @@
+{
+  "name": "padel-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node api/padel-proxy.js"
+  }
+}
 
