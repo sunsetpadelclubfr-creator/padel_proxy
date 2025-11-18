@@ -1,5 +1,8 @@
 // api/update-cache.js
-import { put } from "@vercel/blob";
+//
+// Cette version évite tout import au niveau du module pour @vercel/blob,
+// afin que les erreurs soient CATCHÉES dans la fonction et renvoyées en JSON.
+//
 
 // ---------- Helpers communs ----------
 
@@ -22,7 +25,10 @@ function parseAddress(text) {
   if (cpCity) {
     const cp = cpCity[1];
     return {
-      street: cleanTxt.replace(cpCity[0], "").replace(/,\s*$/, "").trim(),
+      street: cleanTxt
+        .replace(cpCity[0], "")
+        .replace(/,\s*$/, "")
+        .trim(),
       city: cpCity[2],
       department: cp.substring(0, 2),
     };
@@ -46,7 +52,6 @@ function extractType(title) {
 
 function toISODate(text) {
   if (!text) return "";
-  // Devrait matcher des choses comme "17 novembre 2025"
   const months = {
     janv: "01",
     janvier: "01",
@@ -87,18 +92,18 @@ function toISODate(text) {
 }
 
 function extractTournament(html) {
-  // Nom du tournoi
+  // Nom
   const nameMatch = html.match(/<h4 class="name">([\s\S]*?)<\/h4>/);
   const fullName = nameMatch ? clean(nameMatch[1]) : "";
 
-  // Date (sur mobile c’est dans <h5 class="date-responsive ...">)
+  // Date (mobile : <h5 class="date-responsive">…</h5>)
   const dateMatch =
     html.match(/<h5 class="date-responsive[^>]*>([\s\S]*?)<\/h5>/) ||
     html.match(/<span class="month">([\s\S]*?)<\/span>/);
 
   const isoDate = dateMatch ? toISODate(clean(dateMatch[1])) : "";
 
-  // Club & coordonnées
+  // Club
   const clubName = get(
     html,
     /<div class="block-infos club">[\s\S]*?<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
@@ -114,7 +119,7 @@ function extractTournament(html) {
 
   const { street, city, department } = parseAddress(rawAddress);
 
-  // Organisateur (dans l’accordéon)
+  // Organisateur
   const organizerName = get(
     html,
     /<i class="fas fa-user"><\/i>[\s\S]*?<span>\s*([\s\S]*?)\s*<\/span>/
@@ -174,10 +179,26 @@ function parseAllTournaments(allHTML) {
 // ---------- Handler principal ----------
 
 export default async function handler(req, res) {
-  try {
-    let allHTML = "";
+  res.setHeader("Content-Type", "application/json");
 
-    // On charge jusqu’à 10 pages tant qu’il y a des "tournoi-item"
+  try {
+    // 1) Import dynamique de @vercel/blob pour catcher les erreurs
+    let put;
+    try {
+      const blobMod = await import("@vercel/blob");
+      put = blobMod.put;
+    } catch (e) {
+      // Ici, tu verras clairement si @vercel/blob n'est pas installé
+      return res.status(500).json({
+        ok: false,
+        step: "import-blob",
+        error: "Impossible de charger @vercel/blob",
+        details: e.message,
+      });
+    }
+
+    // 2) Scraper toutes les pages de tournois
+    let allHTML = "";
     for (let page = 1; page <= 10; page++) {
       const resp = await fetch(
         `https://tournois.padelmagazine.fr/?lapage=${page}`,
@@ -191,25 +212,27 @@ export default async function handler(req, res) {
       );
 
       if (!resp.ok) {
-        throw new Error(`Upstream HTTP ${resp.status} on page ${page}`);
+        return res.status(500).json({
+          ok: false,
+          step: "fetch-upstream",
+          error: `HTTP ${resp.status} sur la page ${page}`,
+        });
       }
 
       const html = await resp.text();
 
       if (!html.includes("tournoi-item")) {
-        break; // plus de tournois -> on arrête
+        break; // plus de tournois
       }
 
       allHTML += html;
     }
 
     const tournaments = parseAllTournaments(allHTML);
-    console.log("Parsed tournaments:", tournaments.length);
 
-    // Sauvegarde dans le Blob (si le token est bien présent)
-    let blobInfo = null;
+    // 3) Sauvegarde dans le Blob
     try {
-      blobInfo = await put(
+      const blobInfo = await put(
         "padel-cache/tournaments.json",
         JSON.stringify(tournaments),
         {
@@ -218,21 +241,30 @@ export default async function handler(req, res) {
           contentType: "application/json",
         }
       );
-      console.log("Blob saved at:", blobInfo.url);
-    } catch (blobErr) {
-      console.error("Blob save failed:", blobErr);
-      // On ne jette pas l’erreur pour que l’API réponde quand même
-    }
 
-    return res.status(200).json({
-      ok: true,
-      count: tournaments.length,
-      blobUrl: blobInfo?.url || null,
-    });
+      return res.status(200).json({
+        ok: true,
+        step: "done",
+        count: tournaments.length,
+        blobUrl: blobInfo.url,
+        hasToken: !!process.env.BLOB_READ_WRITE_TOKEN,
+      });
+    } catch (e) {
+      // Erreur d'écriture dans le Blob (souvent token manquant/mauvais)
+      return res.status(500).json({
+        ok: false,
+        step: "blob-put",
+        error: e.message,
+        hint:
+          "Vérifie que BLOB_READ_WRITE_TOKEN est bien défini pour le projet padel-proxy (Production + Preview + Development).",
+        hasToken: !!process.env.BLOB_READ_WRITE_TOKEN,
+      });
+    }
   } catch (err) {
     console.error("update-cache ERROR:", err);
     return res.status(500).json({
       ok: false,
+      step: "global",
       error: err.message || "Unknown error",
     });
   }
