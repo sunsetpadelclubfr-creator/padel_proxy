@@ -1,7 +1,15 @@
 {
-  "name": "padel_proxy",
+  "name": "padel-proxy",
   "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo \"Vercel builds serverless functions automatically\"",
+    "start": "vercel dev"
+  },
   "dependencies": {
-    "@vercel/blob": "latest"
+    "@vercel/blob": "latest",
+    "node-fetch": "3.3.2"
   }
 }
