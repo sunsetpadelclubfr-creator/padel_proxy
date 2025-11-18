@@ -1,6 +1,6 @@
 // api/padel-proxy.js
 
-// --- Cache en mémoire (par instance de fonction) ---
+// --- Cache en mémoire (vivant par instance de fonction) ---
 let CACHE = null;
 let CACHE_TIME = 0;
 const CACHE_DURATION = 1000 * 60 * 60 * 6; // 6h
@@ -11,20 +11,27 @@ export default async function handler(req, res) {
     setCors(res);
     return res.status(200).end();
   }
-
   setCors(res);
 
-  const { date = "", dept = "", category = "", type = "", refresh } = req.query;
+  const {
+    date = "",
+    dept = "",
+    category = "",
+    type = "",
+    refresh,
+    debug,
+  } = req.query;
+
   const forceRefresh = refresh === "1";
 
   try {
-    // 1) Si on a un cache valide et pas de refresh forcé → on sert le cache
+    // 1) Cache
     if (!forceRefresh && CACHE && Date.now() - CACHE_TIME < CACHE_DURATION) {
-      const filtered = applyFilters(CACHE, { date, dept, category, type });
-      return res.status(200).json(filtered);
+      const data = debug === "1" ? CACHE.slice(0, 20) : applyFilters(CACHE, { date, dept, category, type });
+      return res.status(200).json(data);
     }
 
-    // 2) Sinon → on recharge toutes les pages
+    // 2) Rechargement complet
     let allHTML = "";
     const MAX_PAGES = 10;
 
@@ -49,7 +56,6 @@ export default async function handler(req, res) {
 
       const html = await upstream.text();
 
-      // Plus de tournois sur cette page → on stoppe
       if (!html.includes("tournoi-item")) break;
 
       allHTML += html;
@@ -59,7 +65,6 @@ export default async function handler(req, res) {
       throw new Error("Empty HTML from padelmagazine");
     }
 
-    // 3) Extraction de chaque tournoi
     const regex = /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
     const tournaments = [];
     let match;
@@ -70,13 +75,15 @@ export default async function handler(req, res) {
       if (parsed) tournaments.push(parsed);
     }
 
-    // Mise à jour du cache
     CACHE = tournaments;
     CACHE_TIME = Date.now();
 
-    // 4) Application des filtres demandés
-    const filtered = applyFilters(tournaments, { date, dept, category, type });
+    // Mode debug → renvoyer brut
+    if (debug === "1") {
+      return res.status(200).json(tournaments.slice(0, 50));
+    }
 
+    const filtered = applyFilters(tournaments, { date, dept, category, type });
     return res.status(200).json(filtered);
   } catch (err) {
     console.error("padel-proxy error:", err);
@@ -99,26 +106,19 @@ function setCors(res) {
 // Extraction d'un tournoi
 // -------------------------------------------------------
 function extractTournament(html) {
-  // Nom du tournoi
+  // Nom
   const nameMatch = html.match(/<h4 class="name">([\s\S]*?)<\/h4>/);
   const fullName = nameMatch ? clean(nameMatch[1]) : "";
   if (!fullName) return null;
 
-  // Catégorie P25 / P100 / P250 / ...
   const category = extractCategory(fullName);
-
-  // Type H / F / M
   const type = extractType(fullName);
 
-  // Date : <h5 class="date-responsive ...">17 novembre 2025</h5>
-  let dateText = get(
-    html,
-    /<h5 class="date-responsive[^>]*>([\s\S]*?)<\/h5>/
-  );
-  if (!dateText) {
-    // fallback ancien format
-    dateText = get(html, /<span class="month">([\s\S]*?)<\/span>/);
-  }
+  // Date : essais successifs (h5 puis span.month)
+  let dateText =
+    get(html, /<h5 class="date-responsive[^>]*>([\s\S]*?)<\/h5>/) ||
+    get(html, /<span class="month">([\s\S]*?)<\/span>/);
+
   const isoDate = toISODate(dateText);
 
   // Club
@@ -133,10 +133,8 @@ function extractTournament(html) {
     /<i class="fas fa-phone-rotary"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
   );
 
-  // ✅ Adresse brute : PRIORITÉ à l'adresse avec code postal (fa-map-marker-alt)
-  // Exemple :
-  // <i class="fas fa-map-marker-alt"></i>
-  // <span>Hameau de Terlincthun, 62200 BOULOGNE SUR MER</span>
+  // Adresse brute :
+  // priorité fa-map-marker-alt (l'organisateur, avec CP) puis fallback adresse club
   let rawAddress =
     get(
       html,
@@ -172,7 +170,7 @@ function extractTournament(html) {
       name: clubName,
       street,
       city,
-      department, // <= maintenant alimenté par le CP
+      department,
       phone: organizerPhone || "",
     },
     organizer: {
@@ -201,13 +199,13 @@ function get(html, regex) {
   return m ? clean(m[1]) : "";
 }
 
-// Adresse → rue (texte brut), ville, département (à partir du CP)
+// Adresse → rue, ville, département
 function parseAddress(text) {
   if (!text) return { street: "", city: "", department: "" };
 
   const cleanTxt = clean(text);
 
-  // On cherche le DERNIER code postal sur la ligne (5 chiffres)
+  // Dernier CP sur la ligne
   const cpMatch = cleanTxt.match(/(\d{5})(?!.*\d{5})/);
   let department = "";
   let city = "";
@@ -216,11 +214,8 @@ function parseAddress(text) {
     const cp = cpMatch[1];
     department = cp.substring(0, 2);
 
-    // Ville = ce qu'il y a après le CP
     const afterCp = cleanTxt.slice(cleanTxt.indexOf(cp) + cp.length).trim();
-    if (afterCp) {
-      city = afterCp;
-    }
+    if (afterCp) city = afterCp;
   }
 
   return {
@@ -243,8 +238,11 @@ function extractType(title) {
   return "";
 }
 
+// 🔥 Version ultra tolérante
 function toISODate(text) {
   if (!text) return "";
+
+  const s = clean(text).toLowerCase();
 
   const months = {
     janv: "01",
@@ -252,13 +250,14 @@ function toISODate(text) {
     févr: "02",
     fevr: "02",
     février: "02",
+    fevrier: "02",
     mars: "03",
     avr: "04",
     avril: "04",
     mai: "05",
     juin: "06",
-    juillet: "07",
     juil: "07",
+    juillet: "07",
     août: "08",
     aout: "08",
     sept: "09",
@@ -267,22 +266,33 @@ function toISODate(text) {
     octobre: "10",
     nov: "11",
     novembre: "11",
-    déc: "12",
     dec: "12",
+    déc: "12",
+    decembre: "12",
     décembre: "12",
   };
 
-  const m = text
-    .toLowerCase()
-    .match(/(\d{1,2})\s+([a-zéûôêî]+)\.?[\s,]+(\d{4})/i);
-  if (!m) return "";
+  // 17 novembre 2025, 17 nov. 2025, etc.
+  const m = s.match(/(\d{1,2})\s+([a-z\u00C0-\u017F\.]+)\s+(\d{4})/i);
+  if (!m) {
+    console.warn("toISODate: impossible de parser", s);
+    return "";
+  }
 
   const day = String(parseInt(m[1], 10)).padStart(2, "0");
-  const monthKey = m[2].toLowerCase();
+  let monthKey = m[2]
+    .toLowerCase()
+    .replace(/\./g, "")
+    .trim();
+
   const month = months[monthKey];
   const year = m[3];
 
-  if (!month) return "";
+  if (!month) {
+    console.warn("toISODate: mois inconnu", monthKey, "dans", s);
+    return "";
+  }
+
   return `${year}-${month}-${day}`;
 }
 
