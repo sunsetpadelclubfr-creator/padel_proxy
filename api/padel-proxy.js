@@ -41,7 +41,6 @@ export default async function handler(req, res) {
       );
 
       if (!upstream.ok) {
-        // Si la 1ère page ne répond pas bien → on arrête tout
         if (page === 1) {
           throw new Error(`Upstream status ${upstream.status}`);
         }
@@ -56,12 +55,11 @@ export default async function handler(req, res) {
       allHTML += html;
     }
 
-    // Si on n'a récupéré aucun HTML, on renvoie une erreur explicite
     if (!allHTML) {
       throw new Error("Empty HTML from padelmagazine");
     }
 
-    // 3) Extraction de chaque tournoi avec REGEX (version qui marchait chez toi)
+    // 3) Extraction de chaque tournoi
     const regex = /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
     const tournaments = [];
     let match;
@@ -104,7 +102,6 @@ function extractTournament(html) {
   // Nom du tournoi
   const nameMatch = html.match(/<h4 class="name">([\s\S]*?)<\/h4>/);
   const fullName = nameMatch ? clean(nameMatch[1]) : "";
-
   if (!fullName) return null;
 
   // Catégorie P25 / P100 / P250 / ...
@@ -113,13 +110,13 @@ function extractTournament(html) {
   // Type H / F / M
   const type = extractType(fullName);
 
-  // Date : nouveau format <h5 class="date-responsive">17 novembre 2025</h5>
+  // Date : <h5 class="date-responsive ...">17 novembre 2025</h5>
   let dateText = get(
     html,
     /<h5 class="date-responsive[^>]*>([\s\S]*?)<\/h5>/
   );
   if (!dateText) {
-    // fallback ancien format : <span class="month">17 novembre 2025</span>
+    // fallback ancien format
     dateText = get(html, /<span class="month">([\s\S]*?)<\/span>/);
   }
   const isoDate = toISODate(dateText);
@@ -130,17 +127,25 @@ function extractTournament(html) {
     /<div class="block-infos club">[\s\S]*?<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
   );
 
-  // Téléphone ORGA (souvent plus utile que le fixe du club)
+  // Téléphone ORGA
   const organizerPhone = get(
     html,
     /<i class="fas fa-phone-rotary"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
   );
 
-  // Adresse brute (contient CP)
-  const rawAddress = get(
-    html,
-    /<img src="\/images\/adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
-  );
+  // ✅ Adresse brute : PRIORITÉ à l'adresse avec code postal (fa-map-marker-alt)
+  // Exemple :
+  // <i class="fas fa-map-marker-alt"></i>
+  // <span>Hameau de Terlincthun, 62200 BOULOGNE SUR MER</span>
+  let rawAddress =
+    get(
+      html,
+      /<i class="fas fa-map-marker-alt"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
+    ) ||
+    get(
+      html,
+      /<img src="\/images\/adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
+    );
 
   const { street, city, department } = parseAddress(rawAddress);
 
@@ -167,7 +172,7 @@ function extractTournament(html) {
       name: clubName,
       street,
       city,
-      department, // <= ici on met bien le département
+      department, // <= maintenant alimenté par le CP
       phone: organizerPhone || "",
     },
     organizer: {
@@ -267,7 +272,6 @@ function toISODate(text) {
     décembre: "12",
   };
 
-  // Ex: "17 novembre 2025"
   const m = text
     .toLowerCase()
     .match(/(\d{1,2})\s+([a-zéûôêî]+)\.?[\s,]+(\d{4})/i);
