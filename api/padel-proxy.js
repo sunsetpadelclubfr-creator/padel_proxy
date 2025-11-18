@@ -2,112 +2,212 @@
 
 let CACHE = null;
 let CACHE_TIME = 0;
-// 12h → mis à jour 2 fois par jour par le cron
-const CACHE_DURATION = 1000 * 60 * 60 * 12;
+const CACHE_DURATION = 1000 * 60 * 60 * 6; // 6h
 
 export default async function handler(req, res) {
-  if (req.method === "OPTIONS") {
-    setCors(res);
-    return res.status(200).end();
-  }
-
-  const { date = "", dept = "", category = "", type = "", refresh } = req.query;
-
-  const forceRefresh = refresh === "1";
-
-  // 👉 Si on ne force pas le refresh ET que le cache est encore valide
-  if (!forceRefresh && CACHE && Date.now() - CACHE_TIME < CACHE_DURATION) {
-    const filtered = applyFilters(CACHE, { date, dept, category, type });
-    setCors(res);
-    return res.status(200).json(filtered);
-  }
-
-  try {
-    // 🟧 1 — Récupération TOUTES PAGES
-    let allHTML = "";
-    let page = 1;
-    const maxPages = 10;
-
-    while (page <= maxPages) {
-      const upstream = await fetch(
-        `https://tournois.padelmagazine.fr/?lapage=${page}`,
-        {
-          headers: {
-            "User-Agent": "Mozilla/5.0",
-            Accept: "text/html",
-          },
-        }
-      );
-
-      const html = await upstream.text();
-
-      // si plus de "tournoi-item", on s'arrête
-      if (!html.includes("tournoi-item")) break;
-
-      allHTML += html;
-      page++;
-    }
-
-    // 🟧 2 — Extraction de tous les tournois
-    const regex = /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
-
-    const tournaments = [];
-    let match;
-
-    while ((match = regex.exec(allHTML)) !== null) {
-      const block = match[0];
-      const parsed = extractTournament(block);
-      if (parsed) tournaments.push(parsed);
-    }
-
-    // 🟧 3 — Mise à jour du cache
-    CACHE = tournaments;
-    CACHE_TIME = Date.now();
-
-    // 🟧 4 — Application des filtres demandés
-    const filtered = applyFilters(CACHE, { date, dept, category, type });
-
-    setCors(res);
-    return res.status(200).json(filtered);
-  } catch (e) {
-    console.error("padel-proxy error:", e);
-    setCors(res);
-    return res.status(500).json({ error: "Proxy error", details: e.message });
-  }
-}
-
-/* ------------------- HELPERS ------------------- */
-
-function setCors(res) {
+  // CORS basique
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  const {
+    date = "",
+    dept = "",
+    category = "",
+    type = "",
+    refresh = "",
+  } = req.query;
+
+  const forceRefresh = refresh === "1";
+
+  try {
+    // 1) Si on a un cache valide et pas de refresh forcé → on filtre le cache
+    if (!forceRefresh && CACHE && Date.now() - CACHE_TIME < CACHE_DURATION) {
+      const filtered = applyFilters(CACHE, { date, dept, category, type });
+      return res.status(200).json(filtered);
+    }
+
+    // 2) Sinon, on recharge toutes les pages + parse
+    const tournaments = await fetchAndParseAll();
+
+    CACHE = tournaments;
+    CACHE_TIME = Date.now();
+
+    const filtered = applyFilters(tournaments, { date, dept, category, type });
+    return res.status(200).json(filtered);
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({ error: "Proxy error", details: err.message });
+  }
 }
 
-function applyFilters(data, { date, dept, category, type }) {
-  return data.filter((t) => {
+//
+// ---------- FETCH & PARSE ----------
+//
+
+async function fetchAndParseAll() {
+  let allHTML = "";
+
+  for (let page = 1; page <= 10; page++) {
+    const resp = await fetch(
+      `https://tournois.padelmagazine.fr/?lapage=${page}`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Accept: "text/html",
+        },
+      }
+    );
+
+    const html = await resp.text();
+
+    // Si plus de tournois → on arrête
+    if (!html.includes('class="tournoi-item"')) break;
+
+    allHTML += html;
+  }
+
+  const regex =
+    /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
+
+  const tournaments = [];
+  let match;
+
+  while ((match = regex.exec(allHTML)) !== null) {
+    const block = match[0];
+    const parsed = extractTournament(block);
+    if (parsed) tournaments.push(parsed);
+  }
+
+  return tournaments;
+}
+
+//
+// ---------- FILTRES ----------
+//
+
+function applyFilters(list, { date, dept, category, type }) {
+  return list.filter((t) => {
     if (date && t.tournament.startDate !== date) return false;
 
     if (dept) {
-      const wanted = dept.split(",");
-      if (!wanted.includes(t.club.department)) return false;
+      const wanted = dept
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (wanted.length && !wanted.includes(t.club.department)) return false;
     }
 
     if (category) {
-      const wanted = category.split(",");
-      if (!wanted.includes(t.tournament.category)) return false;
+      const wanted = category
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (wanted.length && !wanted.includes(t.tournament.category)) return false;
     }
 
     if (type) {
-      const wanted = type.split(",");
-      if (!wanted.includes(t.tournament.type)) return false;
+      const wanted = type
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (wanted.length && !wanted.includes(t.tournament.type)) return false;
     }
 
     return true;
   });
 }
 
-function clean(str) {
+//
+// ---------- PARSE D’UN TOURNOI ----------
+//
+
+function extractTournament(html) {
+  // Nom du tournoi
+  const nameMatch = html.match(/<h4 class="name">([\s\S]*?)<\/h4>/);
+  const fullName = nameMatch ? clean(nameMatch[1]) : "";
+  if (!fullName) return null;
+
+  // Catégorie / type
+  const category = extractCategory(fullName);
+  const type = extractType(fullName);
+
+  // Date (ex: "17 novembre 2025")
+  const dateMatch = html.match(
+    /<h5 class="date-responsive[^>]*>([\s\S]*?)<\/h5>/
+  );
+  const isoDate = dateMatch ? toISODate(clean(dateMatch[1])) : "";
+
+  // Nom du club
+  const clubName = get(
+    html,
+    /<div class="block-infos club">[\s\S]*?<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
+  );
+
+  // 📍 Adresse avec code postal (bloc "map-marker")
+  const rawLocation = get(
+    html,
+    /<i class="fas fa-map-marker-alt"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
+  );
+
+  // 🏟️ Adresse du club (sans code postal) – en secours
+  const rawClubAddress = get(
+    html,
+    /<img src="\/images\/adresse\.svg"[^>]*>[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
+  );
+
+  // On essaye d’abord l’adresse avec CP, sinon on tombe sur celle du club
+  const { street, city, department } = parseAddress(rawLocation || rawClubAddress);
+
+  // Organisateur
+  const organizerName = get(
+    html,
+    /<i class="fas fa-user"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
+  );
+  const organizerEmail = get(
+    html,
+    /<i class="fas fa-at"><\/i>[\s\S]*?<a href="mailto:[^"]+">([^<]+)<\/a>/
+  );
+  const organizerPhone = get(
+    html,
+    /<i class="fas fa-phone-rotary"><\/i>[\s\S]*?<span>([^<]+)<\/span>/
+  );
+
+  return {
+    tournament: {
+      id: `${fullName}_${isoDate}_${clubName}`,
+      name: fullName,
+      category,
+      type,
+      startDate: isoDate,
+      endDate: isoDate,
+    },
+    club: {
+      name: clubName,
+      street,
+      city,
+      department, // 👈 très important pour le filtre dept
+      phone: organizerPhone || "",
+    },
+    organizer: {
+      name: organizerName,
+      email: organizerEmail,
+      phone: organizerPhone || "",
+    },
+  };
+}
+
+//
+// ---------- HELPERS ----------
+//
+
+function clean(str = "") {
   return str.replace(/\s+/g, " ").trim();
 }
 
@@ -121,16 +221,18 @@ function parseAddress(text) {
 
   const cleanTxt = clean(text);
 
+  // Cherche "XXXXX Ville"
   const cpCity = cleanTxt.match(/(\d{5})\s+(.+)/);
   if (cpCity) {
     const cp = cpCity[1];
     return {
-      street: cleanTxt.replace(cpCity[0], "").trim(),
-      city: cpCity[2],
-      department: cp.substring(0, 2),
+      street: cleanTxt.replace(cpCity[0], "").replace(/,\s*$/, "").trim(),
+      city: cpCity[2].trim(),
+      department: cp.substring(0, 2), // ex: "62", "75"…
     };
   }
 
+  // Pas de code postal trouvé → pas de département fiable
   return { street: cleanTxt, city: "", department: "" };
 }
 
@@ -147,21 +249,22 @@ function extractType(title) {
   return "";
 }
 
-// "28 décembre 2025" → "2025-12-28"
 function toISODate(text) {
+  if (!text) return "";
+
   const months = {
     janv: "01",
-    février: "02",
-    fevrier: "02",
+    janvier: "01",
     févr: "02",
     fevr: "02",
+    février: "02",
     mars: "03",
-    avr: "04",
     avril: "04",
+    avr: "04",
     mai: "05",
     juin: "06",
-    juil: "07",
     juillet: "07",
+    juil: "07",
     août: "08",
     aout: "08",
     sept: "09",
@@ -173,82 +276,17 @@ function toISODate(text) {
     déc: "12",
     dec: "12",
     décembre: "12",
-    decembre: "12",
   };
 
-  const m = text.match(/(\d+)\s+([a-zéûôîù]+)\.?\s+(\d{4})/i);
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  const m = cleaned.match(/(\d{1,2})\s+([A-Za-zéûôêèàîïùç]+)\s+(\d{4})/i);
   if (!m) return "";
 
+  const day = String(parseInt(m[1], 10)).padStart(2, "0");
   const monthKey = m[2].toLowerCase();
-  const month = months[monthKey] || "01";
+  const month = months[monthKey];
+  const year = m[3];
 
-  return `${m[3]}-${month}-${String(m[1]).padStart(2, "0")}`;
-}
-
-function extractTournament(html) {
-  // Nom
-  const nameMatch = html.match(/<h4 class="name">([\s\S]*?)<\/h4>/);
-  const fullName = nameMatch ? clean(nameMatch[1]) : "";
-
-  // Catégorie
-  const category = extractCategory(fullName);
-
-  // Type
-  const type = extractType(fullName);
-
-  // Date (texte dans <span class="month">...</span>)
-  const dateMatch = html.match(/<span class="month">([^<]+)<\/span>/);
-  const isoDate = dateMatch ? toISODate(dateMatch[1]) : "";
-
-  // Club
-  const clubName = get(html, /<a href="[^"]+" class="text">([\s\S]*?)<\/a>/);
-  const rawAddress = get(
-    html,
-    /<img src="\/images\/adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
-  );
-  const clubPhone = get(
-    html,
-    /<img src="\/images\/phone\.svg"[^>]*>\s*<span class="text">([\s\S]*?)<\/span>/
-  );
-
-  const { street, city, department } = parseAddress(rawAddress);
-
-  // Organisateur test
-  const organizerName = get(
-    html,
-    /<i class="fas fa-user"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
-  );
-  const organizerEmail = get(
-    html,
-    /<i class="fas fa-at"><\/i>[\s\S]*?<a href="mailto:[^"]+">([^<]+)<\/a>/
-  );
-  const organizerPhone = get(
-    html,
-    /<i class="fas fa-phone-rotary"><\/i>[\s\S]*?<span>([^<]+)<\/span>/
-  );
-
-  if (!fullName || !isoDate) return null;
-
-  return {
-    tournament: {
-      id: `${fullName}_${isoDate}_${clubName}`,
-      name: fullName,
-      category,
-      type,
-      startDate: isoDate,
-      endDate: isoDate,
-    },
-    club: {
-      name: clubName,
-      street,
-      city,
-      department,
-      phone: clubPhone || organizerPhone || "",
-    },
-    organizer: {
-      name: organizerName,
-      email: organizerEmail,
-      phone: organizerPhone,
-    },
-  };
+  if (!month) return "";
+  return `${year}-${month}-${day}`;
 }
