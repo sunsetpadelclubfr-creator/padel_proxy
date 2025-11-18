@@ -2,48 +2,52 @@
 import { get } from "@vercel/blob";
 
 export default async function handler(req, res) {
-  if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    return res.status(200).end();
-  }
-
   const { date = "", dept = "", category = "", type = "" } = req.query;
 
   try {
-    // 1. On lit le fichier JSON dans le Blob
+    // 1. Lire le JSON depuis le Blob
     let tournaments = [];
 
     try {
-      const blobInfo = await get("tournaments.json");
-      const resp = await fetch(blobInfo.url);
+      const blob = await get("padel-cache/tournaments.json");
+      if (!blob || !blob.url) {
+        throw new Error("Blob tournaments.json not found");
+      }
+
+      const resp = await fetch(blob.url);
+      if (!resp.ok) {
+        throw new Error(`Blob HTTP ${resp.status}`);
+      }
+
       tournaments = await resp.json();
-    } catch (err) {
-      console.error("Erreur lecture Blob (tournaments.json):", err);
-      // si erreur, on renvoie un tableau vide
+    } catch (blobErr) {
+      console.error("Error reading blob cache:", blobErr);
+      // Si le cache n’existe pas, on renvoie liste vide
       tournaments = [];
     }
 
-    // 2. Filtres côté API pour gagner du temps côté mobile
+    // 2. Filtres
     const filtered = tournaments.filter((t) => {
+      // sécurité
       if (!t || !t.tournament || !t.club) return false;
 
       if (date && t.tournament.startDate !== date) return false;
 
       if (dept) {
-        const wanted = dept.split(",");
+        const wanted = dept.split(",").map((d) => d.trim());
         if (!wanted.includes(t.club.department)) return false;
       }
 
       if (category) {
-        const wanted = category.split(",");
-        if (!wanted.includes(t.tournament.category)) return false;
+        const wanted = category.split(",").map((c) => c.trim().toUpperCase());
+        if (!wanted.includes((t.tournament.category || "").toUpperCase()))
+          return false;
       }
 
       if (type) {
-        const wanted = type.split(",");
-        if (!wanted.includes(t.tournament.type)) return false;
+        const wanted = type.split(",").map((x) => x.trim().toUpperCase());
+        if (!wanted.includes((t.tournament.type || "").toUpperCase()))
+          return false;
       }
 
       return true;
@@ -52,8 +56,8 @@ export default async function handler(req, res) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     return res.status(200).json(filtered);
   } catch (err) {
-    console.error("padel-proxy error:", err);
+    console.error("padel-proxy ERROR:", err);
     res.setHeader("Access-Control-Allow-Origin", "*");
-    return res.status(500).json({ error: "Proxy error", details: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
   }
 }
