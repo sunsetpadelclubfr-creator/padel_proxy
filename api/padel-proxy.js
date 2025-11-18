@@ -3,11 +3,10 @@
 // --- Cache en mémoire (par instance de fonction) ---
 let CACHE = null;
 let CACHE_TIME = 0;
-// 6 heures
-const CACHE_DURATION = 1000 * 60 * 60 * 6;
+const CACHE_DURATION = 1000 * 60 * 60 * 6; // 6h
 
 export default async function handler(req, res) {
-  // CORS + pré-requête navigateur
+  // CORS + préflight
   if (req.method === "OPTIONS") {
     setCors(res);
     return res.status(200).end();
@@ -19,13 +18,13 @@ export default async function handler(req, res) {
   const forceRefresh = refresh === "1";
 
   try {
-    // --- 1. Utilisation du cache si encore valide ---
+    // 1) Si on a un cache valide et pas de refresh forcé → on sert le cache
     if (!forceRefresh && CACHE && Date.now() - CACHE_TIME < CACHE_DURATION) {
       const filtered = applyFilters(CACHE, { date, dept, category, type });
       return res.status(200).json(filtered);
     }
 
-    // --- 2. Récupération de toutes les pages HTML du site source ---
+    // 2) Sinon → on recharge toutes les pages
     let allHTML = "";
     const MAX_PAGES = 10;
 
@@ -41,24 +40,43 @@ export default async function handler(req, res) {
         }
       );
 
-      if (!upstream.ok) break;
+      if (!upstream.ok) {
+        // Si la 1ère page ne répond pas bien → on arrête tout
+        if (page === 1) {
+          throw new Error(`Upstream status ${upstream.status}`);
+        }
+        break;
+      }
 
       const html = await upstream.text();
 
-      // S'il n'y a plus de tournois sur cette page, on arrête.
+      // Plus de tournois sur cette page → on stoppe
       if (!html.includes("tournoi-item")) break;
 
       allHTML += html;
     }
 
-    // --- 3. Extraction de chaque bloc tournoi ---
-    const tournaments = extractAllTournaments(allHTML);
+    // Si on n'a récupéré aucun HTML, on renvoie une erreur explicite
+    if (!allHTML) {
+      throw new Error("Empty HTML from padelmagazine");
+    }
+
+    // 3) Extraction de chaque tournoi avec REGEX (version qui marchait chez toi)
+    const regex = /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
+    const tournaments = [];
+    let match;
+
+    while ((match = regex.exec(allHTML)) !== null) {
+      const block = match[0];
+      const parsed = extractTournament(block);
+      if (parsed) tournaments.push(parsed);
+    }
 
     // Mise à jour du cache
     CACHE = tournaments;
     CACHE_TIME = Date.now();
 
-    // --- 4. Application des filtres demandés par le client ---
+    // 4) Application des filtres demandés
     const filtered = applyFilters(tournaments, { date, dept, category, type });
 
     return res.status(200).json(filtered);
@@ -71,7 +89,7 @@ export default async function handler(req, res) {
 }
 
 // -------------------------------------------------------
-// Utilitaires CORS
+// CORS
 // -------------------------------------------------------
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -80,70 +98,45 @@ function setCors(res) {
 }
 
 // -------------------------------------------------------
-// 1) Extraction de TOUS les tournois depuis le HTML global
-// -------------------------------------------------------
-function extractAllTournaments(allHTML) {
-  const results = [];
-
-  // On découpe sur le conteneur principal.
-  // Chaque morceau (sauf le premier) commence par un tournoi.
-  const parts = allHTML.split('<div class="tournoi-item"');
-  parts.shift(); // retire ce qu'il y a avant le premier tournoi
-
-  for (const part of parts) {
-    const block = '<div class="tournoi-item"' + part;
-    const parsed = extractTournament(block);
-    if (parsed) {
-      results.push(parsed);
-    }
-  }
-
-  return results;
-}
-
-// -------------------------------------------------------
-// 2) Extraction d'UN tournoi à partir d'un bloc HTML
+// Extraction d'un tournoi
 // -------------------------------------------------------
 function extractTournament(html) {
   // Nom du tournoi
   const nameMatch = html.match(/<h4 class="name">([\s\S]*?)<\/h4>/);
   const fullName = nameMatch ? clean(nameMatch[1]) : "";
 
-  if (!fullName) {
-    // Si on n'a même pas de nom, on drop ce bloc
-    return null;
-  }
+  if (!fullName) return null;
 
-  // Catégorie P25 / P100 / P250 / P500 / etc.
+  // Catégorie P25 / P100 / P250 / ...
   const category = extractCategory(fullName);
 
   // Type H / F / M
   const type = extractType(fullName);
 
-  // Date : on essaie d'abord le <h5 class="date-responsive">
+  // Date : nouveau format <h5 class="date-responsive">17 novembre 2025</h5>
   let dateText = get(
     html,
     /<h5 class="date-responsive[^>]*>([\s\S]*?)<\/h5>/
   );
   if (!dateText) {
-    // fallback : ancien format avec <span class="month">
+    // fallback ancien format : <span class="month">17 novembre 2025</span>
     dateText = get(html, /<span class="month">([\s\S]*?)<\/span>/);
   }
   const isoDate = toISODate(dateText);
 
-  // Nom du club
+  // Club
   const clubName = get(
     html,
     /<div class="block-infos club">[\s\S]*?<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
   );
 
-  // Téléphone (club ou orga)
+  // Téléphone ORGA (souvent plus utile que le fixe du club)
   const organizerPhone = get(
     html,
     /<i class="fas fa-phone-rotary"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
   );
 
-  // Adresse brute (contient le CP + ville + rue, souvent avec <br>)
+  // Adresse brute (contient CP)
   const rawAddress = get(
     html,
     /<img src="\/images\/adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
@@ -174,7 +167,7 @@ function extractTournament(html) {
       name: clubName,
       street,
       city,
-      department, // <= IMPORTANT pour filtre dept
+      department, // <= ici on met bien le département
       phone: organizerPhone || "",
     },
     organizer: {
@@ -186,7 +179,7 @@ function extractTournament(html) {
 }
 
 // -------------------------------------------------------
-// 3) Aides parsing texte
+// Helpers parsing
 // -------------------------------------------------------
 function clean(str) {
   if (!str) return "";
@@ -203,14 +196,13 @@ function get(html, regex) {
   return m ? clean(m[1]) : "";
 }
 
-// Parse adresse -> récupère CP, ville, département
+// Adresse → rue (texte brut), ville, département (à partir du CP)
 function parseAddress(text) {
   if (!text) return { street: "", city: "", department: "" };
 
-  let cleanTxt = clean(text);
+  const cleanTxt = clean(text);
 
-  // Exemple attendu : "1 avenue Jean Monnet 59240 DUNKERQUE"
-  // On cherche le dernier code postal (5 chiffres).
+  // On cherche le DERNIER code postal sur la ligne (5 chiffres)
   const cpMatch = cleanTxt.match(/(\d{5})(?!.*\d{5})/);
   let department = "";
   let city = "";
@@ -260,8 +252,8 @@ function toISODate(text) {
     avril: "04",
     mai: "05",
     juin: "06",
-    juil: "07",
     juillet: "07",
+    juil: "07",
     août: "08",
     aout: "08",
     sept: "09",
@@ -291,7 +283,7 @@ function toISODate(text) {
 }
 
 // -------------------------------------------------------
-// 4) Filtres (date, dept, category, type)
+// Filtres (date, dept, category, type)
 // -------------------------------------------------------
 function applyFilters(list, { date, dept, category, type }) {
   if (!Array.isArray(list)) return [];
@@ -321,7 +313,7 @@ function applyFilters(list, { date, dept, category, type }) {
   });
 }
 
-// fallback au cas où department n'a pas été rempli
+// fallback si jamais department n'a pas été rempli
 function parseDepartmentFromAddress(street) {
   if (!street) return "";
   const m = String(street).match(/(\d{2})\d{3}(?!.*\d{5})/);
