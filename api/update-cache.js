@@ -1,12 +1,10 @@
 // api/update-cache.js
+import { put } from "@vercel/blob";
 
-const MAX_PAGES = 10; // nombre max de pages à scraper
-
-// on garde une référence sur put pour ne pas ré-importer à chaque appel
-let putFn = null;
+const MAX_PAGES = 10;
 
 export default async function handler(req, res) {
-  // CORS
+  // CORS basique
   res.setHeader("Access-Control-Allow-Origin", "*");
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -19,36 +17,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 🔹 import dynamique de @vercel/blob
-    if (!putFn) {
-      try {
-        const mod = await import("@vercel/blob");
-        if (!mod.put) {
-          throw new Error(
-            "Le module @vercel/blob ne contient pas de fonction 'put'"
-          );
-        }
-        putFn = mod.put;
-      } catch (e) {
-        console.error("Erreur import @vercel/blob:", e);
-        return res.status(500).json({
-          error: "Import @vercel/blob failed",
-          message: e.message,
-        });
-      }
-    }
+    console.log("[update-cache] start");
 
-    const token = process.env.BLOB_READ_WRITE_TOKEN;
-    if (!token) {
-      console.error(
-        "BLOB_READ_WRITE_TOKEN manquant dans les variables d'environnement"
-      );
-      return res.status(500).json({
-        error: "Missing BLOB_READ_WRITE_TOKEN env var",
-      });
-    }
-
-    // -------- SCRAPING --------
+    // ---------- 1. Scraping ----------
     let allHTML = "";
 
     for (let page = 1; page <= MAX_PAGES; page++) {
@@ -57,8 +28,8 @@ export default async function handler(req, res) {
         {
           headers: {
             "User-Agent": "Mozilla/5.0",
-            Accept: "text/html",
-          },
+            Accept: "text/html"
+          }
         }
       );
 
@@ -85,42 +56,40 @@ export default async function handler(req, res) {
       if (parsed) tournaments.push(parsed);
     }
 
+    console.log(
+      "[update-cache] tournois extraits :",
+      tournaments.length
+    );
+
     const body = JSON.stringify(tournaments);
 
-    // -------- ÉCRITURE DANS LE BLOB --------
-    let url;
-    try {
-      const result = await putFn("padel-cache/tournaments.json", body, {
+    // ---------- 2. Écriture dans le Blob ----------
+    // Sur Vercel (prod), PAS besoin de BLOB_READ_WRITE_TOKEN.
+    // On écrit toujours dans le même fichier, en public.
+    const result = await put(
+      "padel-cache/tournaments.json",
+      body,
+      {
         access: "public",
-        addRandomSuffix: false,
-        token,
-      });
-      url = result.url;
-    } catch (e) {
-      console.error("Erreur put() vers Blob:", e);
-      return res.status(500).json({
-        error: "Blob put failed",
-        message: e.message,
-      });
-    }
+        addRandomSuffix: false
+      }
+    );
 
     console.log(
-      "Cache mis à jour",
-      url,
-      "tournois:",
-      tournaments.length
+      "[update-cache] blob écrit :",
+      result.url
     );
 
     return res.status(200).json({
       ok: true,
       count: tournaments.length,
-      url,
+      url: result.url
     });
   } catch (err) {
-    console.error("update-cache error (catch global):", err);
+    console.error("[update-cache] ERROR:", err);
     return res.status(500).json({
       error: "Failed to update cache",
-      message: err.message,
+      message: err.message
     });
   }
 }
@@ -147,7 +116,7 @@ function parseAddress(text) {
     return {
       street: cleanTxt.replace(cpCity[0], "").trim(),
       city: cpCity[2],
-      department: cp.substring(0, 2),
+      department: cp.substring(0, 2)
     };
   }
 
@@ -183,7 +152,7 @@ function toISODate(text) {
     oct: "10",
     nov: "11",
     déc: "12",
-    dec: "12",
+    dec: "12"
   };
 
   const m = text.match(
@@ -244,19 +213,19 @@ function extractTournament(html) {
       category,
       type,
       startDate: isoDate,
-      endDate: isoDate,
+      endDate: isoDate
     },
     club: {
       name: clubName,
       street,
       city,
       department,
-      phone: organizerPhone || "",
+      phone: organizerPhone || ""
     },
     organizer: {
       name: organizerName,
       email: organizerEmail,
-      phone: organizerPhone,
-    },
+      phone: organizerPhone
+    }
   };
 }
