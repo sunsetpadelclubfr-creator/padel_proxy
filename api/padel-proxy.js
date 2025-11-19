@@ -120,7 +120,7 @@ function extractTournament(html) {
     /<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
   );
 
-  // ⬇️ NOUVEAU : on récupère tout le bloc adresse puis on enlève le HTML
+  // 🔵 NOUVEAU : adresse complète (texte seulement)
   const rawAddress = getAddress(html);
 
   const { street, city, department } = parseAddress(rawAddress);
@@ -173,42 +173,62 @@ function get(html, regex) {
   return m ? clean(m[1]) : "";
 }
 
-// ⬇️ NOUVEAU : récupère le texte d'adresse complet autour de l'icône
+/**
+ * Récupère le contenu du <span class="text"> qui suit l’icône adresse
+ * et enlève tout le HTML pour garder "rue ... CP VILLE"
+ */
 function getAddress(html) {
-  const blockMatch = html.match(
-    /<img src="\/images\/adresse\.svg"[\s\S]*?<\/div>/
+  const m = html.match(
+    /adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
   );
-  if (!blockMatch) return "";
-  const block = blockMatch[0];
+  if (!m) return "";
 
-  // On enlève toutes les balises HTML
-  const textOnly = block.replace(/<[^>]+>/g, " ");
+  const spanContent = m[1]
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/&nbsp;/gi, " ");
+
+  const textOnly = spanContent.replace(/<[^>]+>/g, " ");
   return clean(textOnly);
 }
 
-// Adresse → rue + CP + ville + département
+/**
+ * Exemple de texte reçu :
+ * "213 rue edouard vaillant 76600 LE HAVRE"
+ */
 function parseAddress(text) {
   if (!text) return { street: "", city: "", department: "" };
 
   const cleanTxt = clean(text);
 
-  // On prend le DERNIER code postal à 5 chiffres dans la chaîne
-  const m = cleanTxt.match(/(\d{5})(?!.*\d{5})/);
-  if (!m) {
-    return { street: cleanTxt, city: "", department: "" };
+  // Cas classique : "..... 75012 PARIS"
+  const cpCity = cleanTxt.match(/(\d{5})\s+([A-ZÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ' \-]+)/i);
+  if (cpCity) {
+    const cp = cpCity[1];
+    const city = clean(cpCity[2]);
+    const street = clean(cleanTxt.slice(0, cpCity.index));
+    return {
+      street,
+      city,
+      department: cp.substring(0, 2),
+    };
   }
 
-  const cp = m[1];
-  const idx = cleanTxt.indexOf(cp);
+  // Fallback : dernier code postal à 5 chiffres dans la chaîne
+  const m = cleanTxt.match(/(\d{5})(?!.*\d{5})/);
+  if (m) {
+    const cp = m[1];
+    const idx = cleanTxt.indexOf(cp);
+    const street = clean(cleanTxt.slice(0, idx));
+    const city = clean(cleanTxt.slice(idx + 5));
+    return {
+      street,
+      city,
+      department: cp.substring(0, 2),
+    };
+  }
 
-  const before = cleanTxt.slice(0, idx).trim();           // rue
-  const after = cleanTxt.slice(idx + cp.length).trim();   // ville
-
-  return {
-    street: before,
-    city: after,
-    department: cp.substring(0, 2),
-  };
+  // Aucun CP trouvé
+  return { street: cleanTxt, city: "", department: "" };
 }
 
 function extractCategory(title) {
