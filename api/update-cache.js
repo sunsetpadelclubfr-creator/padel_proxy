@@ -1,10 +1,10 @@
 // api/update-cache.js
-import { put } from "@vercel/blob";
 
+// Nombre maximal de pages à charger depuis Padel Magazine
 const MAX_PAGES = 10;
 
 export default async function handler(req, res) {
-  // CORS basique
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -17,9 +17,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    console.log("[update-cache] start");
+    console.log("[update-cache] START");
 
-    // ---------- 1. Scraping ----------
+    // ⬇️ IMPORT DYNAMIQUE DE BLOB (si ça plante, ça passe dans catch)
+    const { put } = await import("@vercel/blob");
+
+    // ---------- 1. SCRAPING ----------
     let allHTML = "";
 
     for (let page = 1; page <= MAX_PAGES; page++) {
@@ -63,9 +66,7 @@ export default async function handler(req, res) {
 
     const body = JSON.stringify(tournaments);
 
-    // ---------- 2. Écriture dans le Blob ----------
-    // Sur Vercel (prod), PAS besoin de BLOB_READ_WRITE_TOKEN.
-    // On écrit toujours dans le même fichier, en public.
+    // ---------- 2. ÉCRITURE DANS LE BLOB ----------
     const result = await put(
       "padel-cache/tournaments.json",
       body,
@@ -75,10 +76,7 @@ export default async function handler(req, res) {
       }
     );
 
-    console.log(
-      "[update-cache] blob écrit :",
-      result.url
-    );
+    console.log("[update-cache] blob url :", result.url);
 
     return res.status(200).json({
       ok: true,
@@ -87,9 +85,11 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error("[update-cache] ERROR:", err);
+    // ⬇️ ICI on renvoie le détail, plus besoin de deviner
     return res.status(500).json({
       error: "Failed to update cache",
-      message: err.message
+      message: err.message,
+      stack: err.stack
     });
   }
 }
