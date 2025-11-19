@@ -1,179 +1,199 @@
 // api/update-cache.js
+import { put } from "@vercel/blob";
 
-// ⚠️ On NE met PAS l'import en haut pour pouvoir attraper les erreurs
-// dans un try/catch (sinon Vercel renvoie juste une page 500 blanche).
+const MAX_PAGES = 10; // nombre max de pages à scraper
 
 export default async function handler(req, res) {
+  // CORS simple
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    return res.status(200).end();
+  }
+
+  if (req.method !== "GET") {
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
+
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) {
+    console.error("BLOB_READ_WRITE_TOKEN manquant dans les variables d'environnement");
+    return res
+      .status(500)
+      .json({ error: "Missing BLOB_READ_WRITE_TOKEN env var" });
+  }
+
   try {
-    // Import dynamique de @vercel/blob pour que les erreurs soient catchées
-    const { put } = await import('@vercel/blob');
+    let allHTML = "";
 
-    // Sécurité : uniquement en GET
-    if (req.method !== 'GET') {
-      res.status(405).json({ ok: false, error: 'Method not allowed' });
-      return;
-    }
-
-    // 1. Récupération de TOUTES les pages de tournois
-    let allHTML = '';
-    const maxPages = 10;
-
-    for (let page = 1; page <= maxPages; page++) {
+    for (let page = 1; page <= MAX_PAGES; page++) {
       const resp = await fetch(
         `https://tournois.padelmagazine.fr/?lapage=${page}`,
         {
           headers: {
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-              '(KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-            Accept: 'text/html',
+            "User-Agent": "Mozilla/5.0",
+            Accept: "text/html",
           },
         }
       );
 
       if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status} sur la page ${page}`);
+        throw new Error(`Upstream HTTP ${resp.status}`);
       }
 
       const html = await resp.text();
 
-      // Si plus de bloc "tournoi-item", on s’arrête
-      if (!html.includes('tournoi-item')) break;
+      // plus de tournois -> on arrête
+      if (!html.includes("tournoi-item")) break;
 
       allHTML += html;
     }
 
-    // 2. Extraction de tous les blocs de tournois
-    const blockRegex = /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
-    const tournaments = [];
-    let m;
+    // --- extraction des blocs de tournois ---
+    const regex =
+      /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
 
-    while ((m = blockRegex.exec(allHTML)) !== null) {
-      const parsed = extractTournament(m[0]);
+    const tournaments = [];
+    let match;
+
+    while ((match = regex.exec(allHTML)) !== null) {
+      const block = match[0];
+      const parsed = extractTournament(block);
       if (parsed) tournaments.push(parsed);
     }
 
-    // 3. Sauvegarde dans le blob (fichier unique, sans suffixe aléatoire)
-    const { url } = await put(
-      'padel-cache/tournaments.json',
-      JSON.stringify(tournaments),
-      {
-        access: 'public',
-        addRandomSuffix: false,
-      }
+    const body = JSON.stringify(tournaments);
+
+    // --- écriture dans le Blob Storage ---
+    const { url } = await put("padel-cache/tournaments.json", body, {
+      access: "public",          // fichier lisible en lecture publique
+      addRandomSuffix: false,    // chemin fixe: padel-cache/tournaments.json
+      token,
+    });
+
+    console.log(
+      "Cache mis à jour",
+      url,
+      "tournois:",
+      tournaments.length
     );
 
-    // 4. Réponse OK
-    res.status(200).json({
-      ok: true,
-      count: tournaments.length,
-      blobUrl: url,
-    });
+    return res
+      .status(200)
+      .json({ ok: true, count: tournaments.length, url });
   } catch (err) {
-    console.error('update-cache ERROR:', err);
-    // Ici tu verras enfin le vrai message d’erreur dans le navigateur
-    res.status(500).json({
-      ok: false,
-      error: err.message || String(err),
-      stack: err.stack || null,
+    console.error("update-cache error:", err);
+    return res.status(500).json({
+      error: "Failed to update cache",
+      message: err.message,
     });
   }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Helpers de parsing (même logique que dans padel-proxy.js)         */
-/* ------------------------------------------------------------------ */
+/* ----------------- HELPERS PARSING ----------------- */
 
-function clean(str = '') {
-  return str.replace(/\s+/g, ' ').trim();
+function clean(str = "") {
+  return str.replace(/\s+/g, " ").trim();
 }
 
 function get(html, regex) {
   const m = html.match(regex);
-  return m ? clean(m[1]) : '';
+  return m ? clean(m[1]) : "";
 }
 
 function parseAddress(text) {
-  if (!text) return { street: '', city: '', department: '' };
+  if (!text) return { street: "", city: "", department: "" };
 
   const cleanTxt = clean(text);
 
-  // cherche "CP Ville"
+  // CP + Ville (ex: "62200 BOULOGNE SUR MER")
   const cpCity = cleanTxt.match(/(\d{5})\s+(.+)/);
   if (cpCity) {
     const cp = cpCity[1];
     return {
-      street: cleanTxt.replace(cpCity[0], '').trim(),
+      street: cleanTxt.replace(cpCity[0], "").trim(),
       city: cpCity[2],
       department: cp.substring(0, 2),
     };
   }
 
-  return { street: cleanTxt, city: '', department: '' };
+  return { street: cleanTxt, city: "", department: "" };
 }
 
 function extractCategory(title) {
   const m = title.match(/P\d+/i);
-  return m ? m[0].toUpperCase() : 'LOISIR';
+  return m ? m[0].toUpperCase() : "LOISIR";
 }
 
 function extractType(title) {
   const t = title.toLowerCase();
-  if (t.includes('homme')) return 'H';
-  if (t.includes('femme') || t.includes('dame')) return 'F';
-  if (t.includes('mixte')) return 'M';
-  return '';
+  if (t.includes("homme")) return "H";
+  if (t.includes("femme") || t.includes("dame")) return "F";
+  if (t.includes("mixte")) return "M";
+  return "";
 }
 
 function toISODate(text) {
-  if (!text) return '';
-
   const months = {
-    janv: '01',
-    févr: '02',
-    fevr: '02',
-    mars: '03',
-    avr: '04',
-    mai: '05',
-    juin: '06',
-    juil: '07',
-    août: '08',
-    aout: '08',
-    sept: '09',
-    oct: '10',
-    nov: '11',
-    déc: '12',
-    dec: '12',
+    janv: "01",
+    févr: "02",
+    fevr: "02",
+    mars: "03",
+    avr: "04",
+    mai: "05",
+    juin: "06",
+    juil: "07",
+    août: "08",
+    aout: "08",
+    sept: "09",
+    oct: "10",
+    nov: "11",
+    déc: "12",
+    dec: "12",
   };
 
-  const m = text.match(/(\d+)\s+([a-zéûô]+)\.?\s+(\d{4})/i);
-  if (!m) return '';
+  const m = text.match(
+    /(\d+)\s+([a-zéûôùî]+)\.?\s+(\d{4})/i
+  );
+  if (!m) return "";
 
-  const day = String(m[1]).padStart(2, '0');
+  const day = String(m[1]).padStart(2, "0");
   const monthKey = m[2].toLowerCase();
-  const month = months[monthKey] || '01';
+  const month = months[monthKey] || "01";
   const year = m[3];
 
   return `${year}-${month}-${day}`;
 }
 
 function extractTournament(html) {
-  // Nom
-  const nameMatch = html.match(/<h4 class="name">([\s\S]*?)<\/h4>/);
-  const fullName = nameMatch ? clean(nameMatch[1]) : '';
+  // Nom du tournoi
+  const nameMatch = html.match(
+    /<h4 class="name">([\s\S]*?)<\/h4>/
+  );
+  const fullName = nameMatch ? clean(nameMatch[1]) : "";
 
   if (!fullName) return null;
 
-  // Date (texte dans <span class="month">…</span>)
-  const dateMatch = html.match(/<span class="month">([^<]+)<\/span>/);
-  const isoDate = dateMatch ? toISODate(dateMatch[1]) : '';
+  const category = extractCategory(fullName);
+  const type = extractType(fullName);
 
-  // Club
-  const clubName = get(html, /<a href="[^"]+" class="text">([\s\S]*?)<\/a>/);
+  // Date (dans un span.month sur la carte)
+  const dateMatch = html.match(
+    /<span class="month">([^<]+)<\/span>/
+  );
+  const isoDate = dateMatch ? toISODate(dateMatch[1]) : "";
+
+  // Club & adresse
+  const clubName = get(
+    html,
+    /<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
+  );
   const rawAddress = get(
     html,
     /<img src="\/images\/adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
   );
+
   const { street, city, department } = parseAddress(rawAddress);
 
   // Organisateur
@@ -194,8 +214,8 @@ function extractTournament(html) {
     tournament: {
       id: `${fullName}_${isoDate}_${clubName}`,
       name: fullName,
-      category: extractCategory(fullName),
-      type: extractType(fullName),
+      category,
+      type,
       startDate: isoDate,
       endDate: isoDate,
     },
@@ -204,7 +224,7 @@ function extractTournament(html) {
       street,
       city,
       department,
-      phone: organizerPhone || '',
+      phone: organizerPhone || "",
     },
     organizer: {
       name: organizerName,
