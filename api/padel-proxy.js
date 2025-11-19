@@ -119,10 +119,9 @@ function extractTournament(html) {
     html,
     /<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
   );
-  const rawAddress = get(
-    html,
-    /<img src="\/images\/adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
-  );
+
+  // ⬇️ NOUVEAU : on récupère tout le bloc adresse puis on enlève le HTML
+  const rawAddress = getAddress(html);
 
   const { street, city, department } = parseAddress(rawAddress);
 
@@ -174,22 +173,42 @@ function get(html, regex) {
   return m ? clean(m[1]) : "";
 }
 
+// ⬇️ NOUVEAU : récupère le texte d'adresse complet autour de l'icône
+function getAddress(html) {
+  const blockMatch = html.match(
+    /<img src="\/images\/adresse\.svg"[\s\S]*?<\/div>/
+  );
+  if (!blockMatch) return "";
+  const block = blockMatch[0];
+
+  // On enlève toutes les balises HTML
+  const textOnly = block.replace(/<[^>]+>/g, " ");
+  return clean(textOnly);
+}
+
 // Adresse → rue + CP + ville + département
 function parseAddress(text) {
   if (!text) return { street: "", city: "", department: "" };
+
   const cleanTxt = clean(text);
 
-  const cpCity = cleanTxt.match(/(\d{5})\s+(.+)/);
-  if (cpCity) {
-    const cp = cpCity[1];
-    return {
-      street: cleanTxt.replace(cpCity[0], "").trim(),
-      city: cpCity[2],
-      department: cp.substring(0, 2),
-    };
+  // On prend le DERNIER code postal à 5 chiffres dans la chaîne
+  const m = cleanTxt.match(/(\d{5})(?!.*\d{5})/);
+  if (!m) {
+    return { street: cleanTxt, city: "", department: "" };
   }
 
-  return { street: cleanTxt, city: "", department: "" };
+  const cp = m[1];
+  const idx = cleanTxt.indexOf(cp);
+
+  const before = cleanTxt.slice(0, idx).trim();           // rue
+  const after = cleanTxt.slice(idx + cp.length).trim();   // ville
+
+  return {
+    street: before,
+    city: after,
+    department: cp.substring(0, 2),
+  };
 }
 
 function extractCategory(title) {
@@ -235,4 +254,3 @@ function toISODate(text) {
 
   return `${year}-${month}-${day}`;
 }
- // simple chache
