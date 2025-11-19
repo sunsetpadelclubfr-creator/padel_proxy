@@ -1,68 +1,45 @@
 // api/padel-proxy.js
 
-// ⚠️ À adapter avec TA base URL (Store Information > Base URL)
-const BLOB_BASE_URL =
-  "https://q2tzmq60pef1lix1.public.blob.vercel-storage.com";
-const CACHE_KEY = "padel-cache/tournaments.json";
+const BLOB_BASE_URL = process.env.BLOB_BASE_URL;
+const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
 
-// petit cache mémoire (quelques minutes) pour limiter les lectures blob
+// Petit cache mémoire pour les appels rapprochés
 let MEMORY_CACHE = null;
 let MEMORY_TIME = 0;
-const MEMORY_DURATION = 5 * 60 * 1000; // 5 minutes
+const MEMORY_TTL = 1000 * 60 * 5; // 5 minutes
 
 export default async function handler(req, res) {
-  // CORS
+  // CORS simple (si tu en as besoin côté app)
   res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
   if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     return res.status(200).end();
   }
 
-  if (req.method !== "GET") {
-    return res.status(405).json({ error: "Method Not Allowed" });
-  }
-
-  const { date = "", dept = "", category = "", type = "" } = req.query || {};
+  const { date = "", dept = "", category = "", type = "" } = req.query;
 
   try {
-    let tournaments = MEMORY_CACHE;
+    let tournaments = await loadFromMemoryOrBlob();
 
-    // recharge depuis le blob si pas de cache mémoire ou expiré
-    if (!tournaments || Date.now() - MEMORY_TIME > MEMORY_DURATION) {
-      const url = `${BLOB_BASE_URL}/${CACHE_KEY}`;
-      const resp = await fetch(url);
-
-      if (!resp.ok) {
-        console.error("Erreur lecture blob:", resp.status);
-        return res
-          .status(500)
-          .json({ error: "Impossible de lire le cache" });
-      }
-
-      tournaments = await resp.json();
-      MEMORY_CACHE = tournaments;
-      MEMORY_TIME = Date.now();
-    }
-
-    // --- filtres ---
+    // --- Filtres comme avant ---
     const filtered = tournaments.filter((t) => {
       if (date && t.tournament.startDate !== date) return false;
 
       if (dept) {
-        const wanted = dept.split(",").map((s) => s.trim());
+        const wanted = dept.split(",");
         if (!wanted.includes(t.club.department)) return false;
       }
 
       if (category) {
-        const wanted = category.split(",").map((s) => s.trim().toUpperCase());
+        const wanted = category.split(",");
         if (!wanted.includes(t.tournament.category)) return false;
       }
 
       if (type) {
-        const wanted = type.split(",").map((s) => s.trim().toUpperCase());
-        if (!wanted.includes((t.tournament.type || "").toUpperCase()))
-          return false;
+        const wanted = type.split(",");
+        if (!wanted.includes(t.tournament.type)) return false;
       }
 
       return true;
@@ -70,10 +47,43 @@ export default async function handler(req, res) {
 
     return res.status(200).json(filtered);
   } catch (err) {
-    console.error("padel-proxy error:", err);
-    return res.status(500).json({
-      error: "padel-proxy failed",
-      message: err.message,
-    });
+    console.error("padel-proxy ERROR", err);
+    return res.status(500).json({ error: "Erreur serveur", details: err.message });
   }
+}
+
+async function loadFromMemoryOrBlob() {
+  const now = Date.now();
+  if (MEMORY_CACHE && now - MEMORY_TIME < MEMORY_TTL) {
+    return MEMORY_CACHE;
+  }
+
+  if (!BLOB_BASE_URL || !BLOB_TOKEN) {
+    throw new Error("Configuration Blob manquante (BLOB_BASE_URL ou BLOB_READ_WRITE_TOKEN)");
+  }
+
+  const url = `${BLOB_BASE_URL}/tournaments.json`;
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${BLOB_TOKEN}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (resp.status === 404) {
+    throw new Error("Cache Blob introuvable. Lance /api/update-cache une première fois.");
+  }
+
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    console.error("Erreur GET Blob", resp.status, txt);
+    throw new Error(`Erreur Blob ${resp.status}`);
+  }
+
+  const data = await resp.json();
+  const list = Array.isArray(data.tournaments) ? data.tournaments : [];
+
+  MEMORY_CACHE = list;
+  MEMORY_TIME = now;
+  return list;
 }
