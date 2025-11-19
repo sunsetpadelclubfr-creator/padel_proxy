@@ -1,44 +1,58 @@
 // api/padel-proxy.js
 
-const BLOB_BASE_URL = process.env.BLOB_BASE_URL;
-const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
+// URL publique de ton Blob (base), à ajuster si besoin
+const BLOB_BASE_URL =
+  process.env.BLOB_BASE_URL ||
+  'https://q2tzmq6opef1lix1.public.blob.vercel-storage.com';
 
-// Petit cache mémoire pour les appels rapprochés
-let MEMORY_CACHE = null;
-let MEMORY_TIME = 0;
-const MEMORY_TTL = 1000 * 60 * 5; // 5 minutes
+const CACHE_PATH = 'padel-cache/tournaments.json';
 
 export default async function handler(req, res) {
-  // CORS simple (si tu en as besoin côté app)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
+  // CORS basique
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     return res.status(200).end();
   }
 
-  const { date = "", dept = "", category = "", type = "" } = req.query;
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  const { date = '', dept = '', category = '', type = '' } = req.query;
 
   try {
-    let tournaments = await loadFromMemoryOrBlob();
+    // 1) On récupère le JSON en direct depuis le blob public
+    const url = `${BLOB_BASE_URL.replace(/\/$/, '')}/${CACHE_PATH}`;
 
-    // --- Filtres comme avant ---
+    const upstream = await fetch(url, {
+      headers: {
+        Accept: 'application/json'
+      }
+    });
+
+    if (!upstream.ok) {
+      throw new Error(`Blob fetch failed: ${upstream.status} ${upstream.statusText}`);
+    }
+
+    const data = await upstream.json();
+    const tournaments = data.tournaments || [];
+
+    // 2) Filtres côté serveur
     const filtered = tournaments.filter((t) => {
       if (date && t.tournament.startDate !== date) return false;
 
       if (dept) {
-        const wanted = dept.split(",");
+        const wanted = dept.split(',');
         if (!wanted.includes(t.club.department)) return false;
       }
 
       if (category) {
-        const wanted = category.split(",");
+        const wanted = category.split(',');
         if (!wanted.includes(t.tournament.category)) return false;
       }
 
       if (type) {
-        const wanted = type.split(",");
+        const wanted = type.split(',');
         if (!wanted.includes(t.tournament.type)) return false;
       }
 
@@ -47,43 +61,10 @@ export default async function handler(req, res) {
 
     return res.status(200).json(filtered);
   } catch (err) {
-    console.error("padel-proxy ERROR", err);
-    return res.status(500).json({ error: "Erreur serveur", details: err.message });
+    console.error('❌ Error in padel-proxy:', err);
+    return res.status(500).json({
+      ok: false,
+      error: err.message || 'Unknown error'
+    });
   }
-}
-
-async function loadFromMemoryOrBlob() {
-  const now = Date.now();
-  if (MEMORY_CACHE && now - MEMORY_TIME < MEMORY_TTL) {
-    return MEMORY_CACHE;
-  }
-
-  if (!BLOB_BASE_URL || !BLOB_TOKEN) {
-    throw new Error("Configuration Blob manquante (BLOB_BASE_URL ou BLOB_READ_WRITE_TOKEN)");
-  }
-
-  const url = `${BLOB_BASE_URL}/tournaments.json`;
-  const resp = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${BLOB_TOKEN}`,
-      Accept: "application/json",
-    },
-  });
-
-  if (resp.status === 404) {
-    throw new Error("Cache Blob introuvable. Lance /api/update-cache une première fois.");
-  }
-
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    console.error("Erreur GET Blob", resp.status, txt);
-    throw new Error(`Erreur Blob ${resp.status}`);
-  }
-
-  const data = await resp.json();
-  const list = Array.isArray(data.tournaments) ? data.tournaments : [];
-
-  MEMORY_CACHE = list;
-  MEMORY_TIME = now;
-  return list;
 }
