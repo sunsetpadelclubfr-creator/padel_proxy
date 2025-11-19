@@ -1,10 +1,14 @@
 // api/padel-proxy.js
 
-let CACHE = [];
-let LAST_REFRESH = 0;
-const CACHE_DURATION = 1000 * 60 * 60 * 6; // 6 heures
+// ------------------ CACHE MÉMOIRE ------------------
+let CACHE = null;
+let CACHE_TIME = 0;
+// durée du cache : 6 heures
+const CACHE_DURATION = 1000 * 60 * 60 * 6;
 
+// ------------------ HANDLER PRINCIPAL ------------------
 export default async function handler(req, res) {
+  // Préflight CORS
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -13,181 +17,142 @@ export default async function handler(req, res) {
   }
 
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  const { date = "", dept = "", category = "", type = "", refresh = "" } = req.query;
+
+  // Si pas de ?refresh=1 → on sert le cache s'il est encore valide
+  const forceRefresh = refresh === "1";
+  if (!forceRefresh && CACHE && Date.now() - CACHE_TIME < CACHE_DURATION) {
+    const filtered = applyFilters(CACHE, { date, dept, category, type });
+    return res.status(200).json(filtered);
+  }
 
   try {
-    const {
-      refresh = "0",
-      date = "",
-      dept = "",
-      category = "",
-      type = "",
-    } = req.query;
+    // 1) On charge toutes les pages Padelmag
+    let allHTML = "";
+    const maxPages = 20; // au cas où
 
-    const now = Date.now();
+    for (let page = 1; page <= maxPages; page++) {
+      const upstream = await fetch(
+        `https://tournois.padelmagazine.fr/?lapage=${page}`,
+        {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/117.0",
+            Accept: "text/html",
+          },
+        }
+      );
 
-    // 🔄 Rafraîchir le cache si :
-    //  - refresh=1
-    //  - ou cache vide
-    //  - ou cache trop vieux
-    if (!CACHE.length || now - LAST_REFRESH > CACHE_DURATION || refresh === "1") {
-      CACHE = await fetchAllTournaments();
-      LAST_REFRESH = now;
+      const html = await upstream.text();
+
+      // si plus aucun tournoi dans la page, on arrête
+      if (!html.includes("tournoi-item")) break;
+
+      allHTML += html;
     }
 
-    // 🎯 Filtres en mémoire
-    const filtered = CACHE.filter((t) => {
-      if (date && t.tournament.startDate !== date) return false;
+    // 2) Extraction de chaque bloc tournoi
+    const regex =
+      /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
 
-      if (dept) {
-        const wanted = dept.split(",").map((d) => d.trim());
-        if (!wanted.includes(t.club.department)) return false;
-      }
+    const tournaments = [];
+    let m;
 
-      if (category) {
-        const wanted = category
-          .split(",")
-          .map((c) => c.trim().toUpperCase());
-        if (!wanted.includes(t.tournament.category)) return false;
-      }
+    while ((m = regex.exec(allHTML)) !== null) {
+      const block = m[0];
+      const parsed = extractTournament(block);
+      if (parsed) tournaments.push(parsed);
+    }
 
-      if (type) {
-        const wanted = type.split(",").map((x) => x.trim().toUpperCase());
-        if (!wanted.includes((t.tournament.type || "").toUpperCase()))
-          return false;
-      }
+    // 3) On met à jour le cache global
+    CACHE = tournaments;
+    CACHE_TIME = Date.now();
 
-      return true;
-    });
+    // 4) On applique les filtres demandés
+    const filtered = applyFilters(tournaments, { date, dept, category, type });
 
     return res.status(200).json(filtered);
-  } catch (e) {
-    console.error("Proxy error:", e);
-    return res.status(500).json({ error: "Proxy error", details: e.message });
+  } catch (err) {
+    console.error("Padelmag proxy error:", err);
+    return res.status(500).json({
+      error: "Padelmag proxy error",
+      details: err.message,
+    });
   }
 }
 
-async function fetchAllTournaments() {
-  let allHTML = "";
-  const maxPages = 100;
+// ------------------ FILTRES ------------------
+function applyFilters(tournaments, { date, dept, category, type }) {
+  return tournaments.filter((t) => {
+    if (date && t.tournament.startDate !== date) return false;
 
-  for (let page = 1; page <= maxPages; page++) {
-    const upstream = await fetch(
-      `https://tournois.padelmagazine.fr/?lapage=${page}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          Accept: "text/html",
-        },
-      }
-    );
+    if (dept) {
+      const wanted = dept.split(",").map((d) => d.trim());
+      if (!wanted.includes(t.club.department)) return false;
+    }
 
-    const html = await upstream.text();
+    if (category) {
+      const wanted = category.split(",").map((c) => c.trim());
+      if (!wanted.includes(t.tournament.category)) return false;
+    }
 
-    // S’il n’y a plus de tournois, on arrête
-    if (!html.includes("tournoi-item")) break;
+    if (type) {
+      const wanted = type.split(",").map((x) => x.trim());
+      if (!wanted.includes(t.tournament.type)) return false;
+    }
 
-    allHTML += html;
-  }
-
-  const regex =
-    /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
-
-  const tournaments = [];
-  let match;
-
-  while ((match = regex.exec(allHTML)) !== null) {
-    const block = match[0];
-    const parsed = extractTournament(block);
-    if (parsed) tournaments.push(parsed);
-  }
-
-  return tournaments;
+    return true;
+  });
 }
 
+// ------------------ PARSING D'UN TOURNOI ------------------
 function extractTournament(html) {
-  // ---------- Nom / cat / type / date ----------
+  // Nom complet
   const nameMatch = html.match(/<h4 class="name">([\s\S]*?)<\/h4>/);
   const fullName = nameMatch ? clean(nameMatch[1]) : "";
 
+  if (!fullName) return null;
+
+  // Catégorie
   const category = extractCategory(fullName);
+
+  // Type (H/F/M)
   const type = extractType(fullName);
 
+  // Date
   const dateMatch = html.match(/<span class="month">([^<]+)<\/span>/);
   const isoDate = dateMatch ? toISODate(dateMatch[1]) : "";
 
-  // ---------- Club ----------
+  // Club
   const clubName = get(
     html,
-    /<div class="block-infos club">[\s\S]*?<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
+    /<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
   );
-
-  const rawClubAddress = get(
-    html,
-    /<div class="block-infos club">[\s\S]*?<img src="\/images\/adresse\.svg"[^>]*>[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
-  );
-
   const clubPhone = get(
     html,
-    /<div class="block-infos club">[\s\S]*?<img src="\/images\/phone\.svg"[^>]*>\s*<span class="text">([\s\S]*?)<\/span>/
+    /<img src="\/images\/phone\.svg"[^>]*>\s*<span class="text">([\s\S]*?)<\/span>/
+  );
+  const rawAddress = get(
+    html,
+    /<img src="\/images\/adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
   );
 
-  // ---------- Organisateur (bloc "Informations d'inscription") ----------
+  const { street, city, department } = parseAddress(rawAddress);
+
+  // Organisateur
   const organizerName = get(
     html,
-    /<div class="registration-infos">[\s\S]*?<i class="fas fa-user"><\/i>\s*<span>\s*([\s\S]*?)\s*<\/span>/
+    /<i class="fas fa-user"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
   );
-
   const organizerEmail = get(
     html,
-    /<div class="registration-infos">[\s\S]*?<i class="fas fa-at"><\/i>[\s\S]*?<a href="mailto:[^"]+">([^<]+)<\/a>/
+    /<i class="fas fa-at"><\/i>[\s\S]*?<a href="mailto:[^"]+">([^<]+)<\/a>/
   );
-
   const organizerPhone = get(
     html,
-    /<div class="registration-infos">[\s\S]*?<i class="fas fa-phone-rotary"><\/i>[\s\S]*?<span>\s*([^<]+)\s*<\/span>/
+    /<i class="fas fa-phone-rotary"><\/i>[\s\S]*?<span>([^<]+)<\/span>/
   );
-
-  const organizerAddress = get(
-    html,
-    /<div class="registration-infos">[\s\S]*?<i class="fas fa-map-marker-alt"><\/i>\s*<span>\s*([\s\S]*?)\s*<\/span>/
-  );
-
-  // ---------- Parsing des adresses ----------
-  const {
-    street: clubStreet,
-    city: clubCity,
-    department: clubDept,
-  } = parseAddress(rawClubAddress);
-
-  const {
-    street: orgStreet,
-    city: orgCity,
-    department: orgDept,
-  } = parseAddress(organizerAddress);
-
-  // 🔍 NOUVEAU : on cherche un code postal 5 chiffres dans *tout* le HTML du tournoi
-  let globalCP = "";
-  let globalCity = "";
-
-  const cpGlobal = html.match(/(\d{5})\s+([^<\n]+)/);
-  if (cpGlobal) {
-    globalCP = cpGlobal[1];
-    globalCity = clean(cpGlobal[2]);
-  }
-
-  const department =
-    (globalCP && globalCP.substring(0, 2)) ||
-    clubDept ||
-    orgDept ||
-    "";
-
-  const finalCity = clubCity || orgCity || globalCity;
-
-  if (!fullName || !isoDate) {
-    return null;
-  }
 
   return {
     tournament: {
@@ -200,29 +165,22 @@ function extractTournament(html) {
     },
     club: {
       name: clubName,
-      street: clubStreet || rawClubAddress || orgStreet || organizerAddress,
-      city: finalCity,
-      department: department,
-      phone: clubPhone || organizerPhone || "",
+      street,
+      city,
+      department, // peut être vide si Padelmag ne fournit pas de CP
+      phone: organizerPhone || clubPhone || "",
     },
     organizer: {
       name: organizerName,
       email: organizerEmail,
       phone: organizerPhone || "",
-      address: organizerAddress,
     },
   };
 }
 
-// -------------- HELPERS --------------
-
-function clean(str) {
-  if (!str) return "";
-  return str
-    .replace(/\s+/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&#039;/g, "'")
-    .trim();
+// ------------------ HELPERS ------------------
+function clean(str = "") {
+  return str.replace(/\s+/g, " ").trim();
 }
 
 function get(html, regex) {
@@ -230,43 +188,41 @@ function get(html, regex) {
   return m ? clean(m[1]) : "";
 }
 
+// Essaie de récupérer rue / ville / département à partir d'une adresse
 function parseAddress(text) {
   if (!text) return { street: "", city: "", department: "" };
 
   const cleanTxt = clean(text);
 
-  // On cherche "XXXXX Ville..."
+  // Si un code postal à 5 chiffres est présent, on s'en sert
   const cpCity = cleanTxt.match(/(\d{5})\s+(.+)/);
   if (cpCity) {
     const cp = cpCity[1];
     return {
-      street: cleanTxt
-        .replace(cpCity[0], "")
-        .replace(/[,;-]\s*$/, "")
-        .trim(),
-      city: cpCity[2].trim(),
+      street: cleanTxt.replace(cpCity[0], "").trim(),
+      city: cpCity[2],
       department: cp.substring(0, 2),
     };
   }
 
-  // Pas de code postal trouvé
+  // Sinon : on renvoie juste la rue complète, sans département
   return { street: cleanTxt, city: "", department: "" };
 }
 
 function extractCategory(title) {
   const m = title.match(/P\d+/i);
-  if (m) return m[0].toUpperCase();
-  return "LOISIR";
+  return m ? m[0].toUpperCase() : "LOISIR";
 }
 
 function extractType(title) {
-  const t = (title || "").toLowerCase();
+  const t = title.toLowerCase();
   if (t.includes("homme")) return "H";
   if (t.includes("femme") || t.includes("dame")) return "F";
   if (t.includes("mixte")) return "M";
   return "";
 }
 
+// Convertit "18 novembre 2025" → "2025-11-18"
 function toISODate(text) {
   if (!text) return "";
 
@@ -296,20 +252,17 @@ function toISODate(text) {
     décembre: "12",
   };
 
-  const txt = text.toLowerCase();
-  const m = txt.match(
-    /(\d{1,2})\s+([a-zéûôùêîäëïöüç]+)\.?\s+(\d{4})/i
+  const m = text.match(
+    /(\d{1,2})\s+([a-zéûôàîù]+)\.?\s+(\d{4})/i
   );
   if (!m) return "";
 
-  const day = String(parseInt(m[1], 10)).padStart(2, "0");
-  const rawMonth = m[2]
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, ""); // enlever accents
-  const month = months[rawMonth] || months[m[2]];
+  const day = String(m[1]).padStart(2, "0");
+  const monthKey = m[2].toLowerCase();
+  const year = m[3];
 
+  const month = months[monthKey];
   if (!month) return "";
 
-  const year = m[3];
   return `${year}-${month}-${day}`;
 }
