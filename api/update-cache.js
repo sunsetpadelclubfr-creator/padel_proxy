@@ -1,10 +1,12 @@
 // api/update-cache.js
-import { put } from "@vercel/blob";
 
 const MAX_PAGES = 10; // nombre max de pages à scraper
 
+// on garde une référence sur put pour ne pas ré-importer à chaque appel
+let putFn = null;
+
 export default async function handler(req, res) {
-  // CORS simple
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -16,15 +18,37 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!token) {
-    console.error("BLOB_READ_WRITE_TOKEN manquant dans les variables d'environnement");
-    return res
-      .status(500)
-      .json({ error: "Missing BLOB_READ_WRITE_TOKEN env var" });
-  }
-
   try {
+    // 🔹 import dynamique de @vercel/blob
+    if (!putFn) {
+      try {
+        const mod = await import("@vercel/blob");
+        if (!mod.put) {
+          throw new Error(
+            "Le module @vercel/blob ne contient pas de fonction 'put'"
+          );
+        }
+        putFn = mod.put;
+      } catch (e) {
+        console.error("Erreur import @vercel/blob:", e);
+        return res.status(500).json({
+          error: "Import @vercel/blob failed",
+          message: e.message,
+        });
+      }
+    }
+
+    const token = process.env.BLOB_READ_WRITE_TOKEN;
+    if (!token) {
+      console.error(
+        "BLOB_READ_WRITE_TOKEN manquant dans les variables d'environnement"
+      );
+      return res.status(500).json({
+        error: "Missing BLOB_READ_WRITE_TOKEN env var",
+      });
+    }
+
+    // -------- SCRAPING --------
     let allHTML = "";
 
     for (let page = 1; page <= MAX_PAGES; page++) {
@@ -44,13 +68,11 @@ export default async function handler(req, res) {
 
       const html = await resp.text();
 
-      // plus de tournois -> on arrête
       if (!html.includes("tournoi-item")) break;
 
       allHTML += html;
     }
 
-    // --- extraction des blocs de tournois ---
     const regex =
       /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
 
@@ -65,12 +87,22 @@ export default async function handler(req, res) {
 
     const body = JSON.stringify(tournaments);
 
-    // --- écriture dans le Blob Storage ---
-    const { url } = await put("padel-cache/tournaments.json", body, {
-      access: "public",          // fichier lisible en lecture publique
-      addRandomSuffix: false,    // chemin fixe: padel-cache/tournaments.json
-      token,
-    });
+    // -------- ÉCRITURE DANS LE BLOB --------
+    let url;
+    try {
+      const result = await putFn("padel-cache/tournaments.json", body, {
+        access: "public",
+        addRandomSuffix: false,
+        token,
+      });
+      url = result.url;
+    } catch (e) {
+      console.error("Erreur put() vers Blob:", e);
+      return res.status(500).json({
+        error: "Blob put failed",
+        message: e.message,
+      });
+    }
 
     console.log(
       "Cache mis à jour",
@@ -79,11 +111,13 @@ export default async function handler(req, res) {
       tournaments.length
     );
 
-    return res
-      .status(200)
-      .json({ ok: true, count: tournaments.length, url });
+    return res.status(200).json({
+      ok: true,
+      count: tournaments.length,
+      url,
+    });
   } catch (err) {
-    console.error("update-cache error:", err);
+    console.error("update-cache error (catch global):", err);
     return res.status(500).json({
       error: "Failed to update cache",
       message: err.message,
@@ -107,7 +141,6 @@ function parseAddress(text) {
 
   const cleanTxt = clean(text);
 
-  // CP + Ville (ex: "62200 BOULOGNE SUR MER")
   const cpCity = cleanTxt.match(/(\d{5})\s+(.+)/);
   if (cpCity) {
     const cp = cpCity[1];
@@ -167,24 +200,20 @@ function toISODate(text) {
 }
 
 function extractTournament(html) {
-  // Nom du tournoi
   const nameMatch = html.match(
     /<h4 class="name">([\s\S]*?)<\/h4>/
   );
   const fullName = nameMatch ? clean(nameMatch[1]) : "";
-
   if (!fullName) return null;
 
   const category = extractCategory(fullName);
   const type = extractType(fullName);
 
-  // Date (dans un span.month sur la carte)
   const dateMatch = html.match(
     /<span class="month">([^<]+)<\/span>/
   );
   const isoDate = dateMatch ? toISODate(dateMatch[1]) : "";
 
-  // Club & adresse
   const clubName = get(
     html,
     /<a href="[^"]+" class="text">([\s\S]*?)<\/a>/
@@ -193,10 +222,8 @@ function extractTournament(html) {
     html,
     /<img src="\/images\/adresse\.svg"[\s\S]*?<span class="text">([\s\S]*?)<\/span>/
   );
-
   const { street, city, department } = parseAddress(rawAddress);
 
-  // Organisateur
   const organizerName = get(
     html,
     /<i class="fas fa-user"><\/i>[\s\S]*?<span>([\s\S]*?)<\/span>/
