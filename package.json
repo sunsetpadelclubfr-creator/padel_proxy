@@ -1,8 +1,4 @@
 {
   "name": "padel-proxy",
-  "version": "1.0.0",
-  "type": "module",
-  "dependencies": {
-    "@vercel/blob": "latest"
-  }
+  "version": "1.0.0"
 }
