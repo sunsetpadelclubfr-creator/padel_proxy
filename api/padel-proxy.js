@@ -161,14 +161,29 @@ function extractTournament(html) {
     department: clubDept,
   } = parseAddress(rawClubAddress);
 
-  // 👉 ICI : on récupère le département depuis l'adresse organisateur si besoin
   const {
     street: orgStreet,
     city: orgCity,
     department: orgDept,
   } = parseAddress(organizerAddress);
 
-  const department = clubDept || orgDept;
+  // 🔍 NOUVEAU : on cherche un code postal 5 chiffres dans *tout* le HTML du tournoi
+  let globalCP = "";
+  let globalCity = "";
+
+  const cpGlobal = html.match(/(\d{5})\s+([^<\n]+)/);
+  if (cpGlobal) {
+    globalCP = cpGlobal[1];
+    globalCity = clean(cpGlobal[2]);
+  }
+
+  const department =
+    (globalCP && globalCP.substring(0, 2)) ||
+    clubDept ||
+    orgDept ||
+    "";
+
+  const finalCity = clubCity || orgCity || globalCity;
 
   if (!fullName || !isoDate) {
     return null;
@@ -185,9 +200,9 @@ function extractTournament(html) {
     },
     club: {
       name: clubName,
-      street: clubStreet || rawClubAddress,
-      city: clubCity || orgCity,
-      department: department || "",
+      street: clubStreet || rawClubAddress || orgStreet || organizerAddress,
+      city: finalCity,
+      department: department,
       phone: clubPhone || organizerPhone || "",
     },
     organizer: {
