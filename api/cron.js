@@ -1,17 +1,15 @@
 // api/cron.js
+
 export default async function handler(req, res) {
   try {
-    const url = `https://${req.headers.host}/api/update-cache`;
-    const upstream = await fetch(url);
-    const data = await upstream.json();
+    const url = `${process.env.VERCEL_URL?.startsWith("http") ? "" : "https://"}${
+      process.env.VERCEL_URL
+    }/api/update-cache`;
 
-    return res.status(200).json({
-      ok: true,
-      triggered: true,
-      data,
-    });
+    await fetch(url);
+    return res.status(200).json({ ok: true });
   } catch (err) {
-    console.error("Cron ERROR:", err);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error("cron ERROR", err);
+    return res.status(500).json({ error: "cron failed", details: err.message });
   }
 }
