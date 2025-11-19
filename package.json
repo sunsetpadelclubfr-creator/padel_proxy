@@ -1,13 +1,8 @@
 {
-  "name": "padel_proxy",
+  "name": "padel-proxy",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "vercel dev",
-    "start": "vercel dev"
-  },
   "dependencies": {
-    "@vercel/blob": "^0.24.0"
+    "@vercel/blob": "latest"
   }
 }
