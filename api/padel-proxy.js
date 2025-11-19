@@ -70,7 +70,7 @@ export default async function handler(req, res) {
 
 async function fetchAllTournaments() {
   let allHTML = "";
-  const maxPages = 10;
+  const maxPages = 100;
 
   for (let page = 1; page <= maxPages; page++) {
     const upstream = await fetch(
