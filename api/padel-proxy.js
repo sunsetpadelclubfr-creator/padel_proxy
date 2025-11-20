@@ -6,6 +6,9 @@ let CACHE_TIME = 0;
 // durée du cache : 6 heures
 const CACHE_DURATION = 1000 * 60 * 60 * 6;
 
+// petit cache mémoire pour le géocodage (adresse → dept)
+const GEO_CACHE = new Map();
+
 // ------------------ HANDLER PRINCIPAL ------------------
 export default async function handler(req, res) {
   // Préflight CORS
@@ -20,17 +23,18 @@ export default async function handler(req, res) {
 
   const { date = "", dept = "", category = "", type = "", refresh = "" } = req.query;
 
-  // Si pas de ?refresh=1 → on sert le cache s'il est encore valide
   const forceRefresh = refresh === "1";
+
+  // 1) Si pas de refresh, on essaie de servir le cache
   if (!forceRefresh && CACHE && Date.now() - CACHE_TIME < CACHE_DURATION) {
     const filtered = applyFilters(CACHE, { date, dept, category, type });
     return res.status(200).json(filtered);
   }
 
   try {
-    // 1) On charge toutes les pages Padelmag
+    // 2) Scraping Padelmag
     let allHTML = "";
-    const maxPages = 20; // au cas où
+    const maxPages = 20;
 
     for (let page = 1; page <= maxPages; page++) {
       const upstream = await fetch(
@@ -46,13 +50,12 @@ export default async function handler(req, res) {
 
       const html = await upstream.text();
 
-      // si plus aucun tournoi dans la page, on arrête
       if (!html.includes("tournoi-item")) break;
 
       allHTML += html;
     }
 
-    // 2) Extraction de chaque bloc tournoi
+    // 3) Extraction des blocs tournois
     const regex =
       /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
 
@@ -65,11 +68,14 @@ export default async function handler(req, res) {
       if (parsed) tournaments.push(parsed);
     }
 
-    // 3) On met à jour le cache global
+    // 4) Géocodage pour compléter les départements manquants
+    await enrichDepartmentsWithGeocoding(tournaments);
+
+    // 5) Mise à jour du cache mémoire
     CACHE = tournaments;
     CACHE_TIME = Date.now();
 
-    // 4) On applique les filtres demandés
+    // 6) Application des filtres
     const filtered = applyFilters(tournaments, { date, dept, category, type });
 
     return res.status(200).json(filtered);
@@ -104,6 +110,80 @@ function applyFilters(tournaments, { date, dept, category, type }) {
 
     return true;
   });
+}
+
+// ------------------ GÉOCODAGE ADRESSE → DÉPARTEMENT ------------------
+
+async function enrichDepartmentsWithGeocoding(tournaments) {
+  for (const t of tournaments) {
+    if (!t.club.department && t.club.street) {
+      try {
+        const dept = await geocodeDepartmentFromAddress(
+          `${t.club.street}, France`
+        );
+        if (dept) {
+          t.club.department = dept;
+        }
+      } catch (e) {
+        console.warn("Geocoding failed for:", t.club.street, e.message);
+      }
+      // pour rester sympa avec Nominatim : pause légère
+      await sleep(300); // 300ms entre chaque requête
+    }
+  }
+}
+
+async function geocodeDepartmentFromAddress(address) {
+  const key = address.trim();
+  if (!key) return "";
+
+  if (GEO_CACHE.has(key)) {
+    return GEO_CACHE.get(key);
+  }
+
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=${encodeURIComponent(
+    key
+  )}`;
+
+  const resp = await fetch(url, {
+    headers: {
+      "User-Agent": "sunsetpadelclub-padelproxy/1.0 (contact: votre-email)",
+      Accept: "application/json",
+    },
+  });
+
+  if (!resp.ok) {
+    console.warn("Nominatim error HTTP:", resp.status);
+    GEO_CACHE.set(key, "");
+    return "";
+  }
+
+  const data = await resp.json();
+  if (!Array.isArray(data) || data.length === 0) {
+    GEO_CACHE.set(key, "");
+    return "";
+  }
+
+  const addr = data[0].address || {};
+  const postcode = addr.postcode || "";
+  let dept = "";
+
+  if (postcode && postcode.length >= 2) {
+    // Corse : 2A / 2B → on peut décider de renvoyer 2A/2B ou 20
+    if (postcode.startsWith("20") && addr.state && addr.state.includes("Corse")) {
+      // si on veut garder 2A/2B, il faudrait une table state -> code
+      dept = "20";
+    } else {
+      dept = postcode.substring(0, 2);
+    }
+  }
+
+  GEO_CACHE.set(key, dept);
+  return dept;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ------------------ PARSING D'UN TOURNOI ------------------
@@ -167,7 +247,7 @@ function extractTournament(html) {
       name: clubName,
       street,
       city,
-      department, // peut être vide si Padelmag ne fournit pas de CP
+      department, // peut être complété après géocodage
       phone: organizerPhone || clubPhone || "",
     },
     organizer: {
@@ -188,13 +268,12 @@ function get(html, regex) {
   return m ? clean(m[1]) : "";
 }
 
-// Essaie de récupérer rue / ville / département à partir d'une adresse
 function parseAddress(text) {
   if (!text) return { street: "", city: "", department: "" };
 
   const cleanTxt = clean(text);
 
-  // Si un code postal à 5 chiffres est présent, on s'en sert
+  // Si un code postal à 5 chiffres est présent (rare sur Padelmag)
   const cpCity = cleanTxt.match(/(\d{5})\s+(.+)/);
   if (cpCity) {
     const cp = cpCity[1];
