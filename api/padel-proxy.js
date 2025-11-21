@@ -1,5 +1,5 @@
 // api/padel-proxy.js
-
+// test redeploy 20-11
 // ------------------ CACHE MÉMOIRE ------------------  
 let CACHE = null;
 let CACHE_TIME = 0;
