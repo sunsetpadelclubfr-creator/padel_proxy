@@ -8,7 +8,7 @@ let CACHE_TIME = 0;
 const CACHE_DURATION = 1000 * 60 * 60 * 6;
 
 // Limite de sécurité au cas où Padelmag aurait 200 pages…
-const HARD_MAX_PAGES = 80;
+const HARD_MAX_PAGES = 200;
 
 // ------------------ HANDLER PRINCIPAL ------------------
 export default async function handler(req, res) {
