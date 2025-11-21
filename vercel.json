@@ -1,16 +1,8 @@
 {
-  "functions": {
-    "api/padel-proxy.js": {
-      "maxDuration": 10
-    },
-    "api/update-cache.js": {
-      "maxDuration": 60
-    }
-  },
-  "crons": [ 
+  "crons": [
     {
-      "path": "/api/update-cache",
-      "schedule": "0 */6 * * *"
+      "path": "/api/padel-proxy?refresh=1",
+      "schedule": "0 4 * * *"
     }
   ]
 }
