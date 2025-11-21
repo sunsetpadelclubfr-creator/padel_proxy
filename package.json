@@ -1,13 +1,10 @@
 {
-  "name": "padel-proxy",
+  "name": "padel-scraper",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "echo 'no build'",
-    "start": "node api/padel-proxy.js"
+    "scrape": "node scraper.js"
   },
-  "dependencies": {
-    "node-fetch": "^3.3.2"
-  }
+  "dependencies": {}
 }
