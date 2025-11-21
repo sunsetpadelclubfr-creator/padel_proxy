@@ -1,5 +1,13 @@
 {
   "name": "padel-proxy",
   "version": "1.0.0",
-  "private": true
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "echo 'no build'",
+    "start": "node api/padel-proxy.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
 }
