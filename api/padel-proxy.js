@@ -7,6 +7,9 @@ let CACHE_TIME = 0;
 // durée du cache : 6 heures
 const CACHE_DURATION = 1000 * 60 * 60 * 6;
 
+// Limite de sécurité au cas où Padelmag aurait 200 pages…
+const HARD_MAX_PAGES = 80;
+
 // ------------------ HANDLER PRINCIPAL ------------------
 export default async function handler(req, res) {
   // Préflight CORS
@@ -24,66 +27,15 @@ export default async function handler(req, res) {
 
   const forceRefresh = refresh === "1";
 
-  // 1) Si pas de refresh, on essaie de servir le cache
+  // 1) Si pas de refresh, on essaie de servir le cache mémoire
   if (!forceRefresh && CACHE && Date.now() - CACHE_TIME < CACHE_DURATION) {
     const filtered = applyFilters(CACHE, { date, dept, category, type });
     return res.status(200).json(filtered);
   }
 
   try {
-    // 2) Scraping Padelmag – VERSION OPTIMISÉE
-    //    - on parse page par page (plus de gros allHTML)
-    //    - regex appliquée directement sur chaque page
-    //    - on évite les doublons avec un Set
-
-    const maxPages = 20; // sécurité
-    const tournaments = [];
-    const seenIds = new Set();
-
-    // Regex pour extraire les blocs de tournois
-    const blockRegex =
-      /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
-
-    for (let page = 1; page <= maxPages; page++) {
-      const upstream = await fetch(
-        `https://tournois.padelmagazine.fr/?lapage=${page}`,
-        {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/117.0",
-            Accept: "text/html",
-          },
-        }
-      );
-
-      if (!upstream.ok) {
-        console.warn("Padelmag HTTP error page", page, upstream.status);
-        break;
-      }
-
-      const html = await upstream.text();
-
-      // Si la page ne contient pas de bloc tournoi, on s'arrête
-      if (!html.includes("tournoi-item")) {
-        break;
-      }
-
-      // IMPORTANT : remettre l'index du regex à 0 pour chaque nouvelle page
-      blockRegex.lastIndex = 0;
-
-      let m;
-      while ((m = blockRegex.exec(html)) !== null) {
-        const block = m[0];
-        const parsed = extractTournament(block);
-        if (!parsed) continue;
-
-        const id = parsed.tournament.id;
-        if (seenIds.has(id)) continue; // évite d'éventuels doublons
-
-        seenIds.add(id);
-        tournaments.push(parsed);
-      }
-    }
+    // 2) Scraping complet de Padelmag (toutes les pages trouvées)
+    const tournaments = await scrapeAllTournaments();
 
     // 3) Mise à jour du cache mémoire
     CACHE = tournaments;
@@ -99,6 +51,106 @@ export default async function handler(req, res) {
       error: "Padelmag proxy error",
       details: err.message,
     });
+  }
+}
+
+// ------------------ SCRAPING COMPLET ------------------
+
+async function scrapeAllTournaments() {
+  const tournaments = [];
+  const seenIds = new Set();
+
+  // --- 1) Charger la page 1 ---
+  const firstResp = await fetch(
+    "https://tournois.padelmagazine.fr/?lapage=1",
+    {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/117.0",
+        Accept: "text/html",
+      },
+    }
+  );
+
+  if (!firstResp.ok) {
+    throw new Error("Padelmag HTTP error page 1: " + firstResp.status);
+  }
+
+  const firstHtml = await firstResp.text();
+
+  if (!firstHtml.includes("tournoi-item")) {
+    // Aucun tournoi → on retourne un tableau vide
+    return [];
+  }
+
+  // --- 2) Déterminer le nombre total de pages à partir de la pagination ---
+  const lastPage = detectLastPage(firstHtml);
+  const pagesToFetch = Math.min(lastPage, HARD_MAX_PAGES);
+  console.log("Padelmag pages détectées :", lastPage, "→ utilisées :", pagesToFetch);
+
+  // --- 3) Parser la page 1 ---
+  parsePageIntoTournaments(firstHtml, tournaments, seenIds);
+
+  // --- 4) Charger les pages 2..N ---
+  for (let page = 2; page <= pagesToFetch; page++) {
+    const resp = await fetch(
+      `https://tournois.padelmagazine.fr/?lapage=${page}`,
+      {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/117.0",
+          Accept: "text/html",
+        },
+      }
+    );
+
+    if (!resp.ok) {
+      console.warn("Padelmag HTTP error page", page, resp.status);
+      break;
+    }
+
+    const html = await resp.text();
+
+    if (!html.includes("tournoi-item")) {
+      // Plus de blocs tournois → on arrête
+      break;
+    }
+
+    parsePageIntoTournaments(html, tournaments, seenIds);
+  }
+
+  return tournaments;
+}
+
+// Détecte le numéro de la dernière page grâce à tous les liens ?lapage=XX
+function detectLastPage(html) {
+  const matches = [...html.matchAll(/lapage=(\d+)/g)];
+  if (matches.length === 0) return 1;
+
+  let max = 1;
+  for (const m of matches) {
+    const n = parseInt(m[1], 10);
+    if (!Number.isNaN(n) && n > max) max = n;
+  }
+  return max;
+}
+
+// Parse une page HTML complète et ajoute les tournois à la liste
+function parsePageIntoTournaments(html, tournaments, seenIds) {
+  const blockRegex =
+    /<div class="tournoi-item"[\s\S]*?class="accordion-item">/g;
+
+  let m;
+  while ((m = blockRegex.exec(html)) !== null) {
+    const block = m[0];
+    const parsed = extractTournament(block);
+    if (!parsed) continue;
+
+    const id = parsed.tournament.id;
+    if (seenIds.has(id)) continue;
+
+    seenIds.add(id);
+    tournaments.push(parsed);
   }
 }
 
